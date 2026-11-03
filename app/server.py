@@ -12,12 +12,10 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+from app.policy import apply_policy, tighten
 from app.runner import docker_ready, execute_csv
 
 ROOT = Path(__file__).resolve().parents[1]
-MAX_MEM = 512
-MAX_CPU = 1
-MAX_TIME = 60
 
 RUNS = {}
 LOCK = threading.Lock()
@@ -204,46 +202,19 @@ def infer_manifest(task: str) -> tuple[dict, str]:
             source = "Deterministic planner (Vultr inference unavailable)"
             logger.exception("Vultr inference request failed.")
 
-    # For this demonstrator tasks consume a fixed, reviewed capability template.
-    # Model suggestions never expand permissions.
-    manifest = {
-        "summary": str(
-            draft.get("summary")
-            or "Analyze the bundled sales CSV and return top products by revenue."
-        )[:180],
-        "network_domains": [],
-        "files": [
-            "/workspace/input/sales.csv:read",
-            "/workspace/output/report.json:write",
-        ],
-        "memory_mb": min(MAX_MEM, max(64, _integer(draft.get("memory_mb"), 256))),
-        "cpu_cores": min(MAX_CPU, max(0.25, _number(draft.get("cpu_cores"), 1))),
-        "time_seconds": min(MAX_TIME, max(5, _integer(draft.get("time_seconds"), 30))),
-        "secrets": [],
-    }
+    # Model suggestions never expand permissions; app.policy decides the manifest.
+    manifest, notes = apply_policy(draft)
 
     logger.info(
-        "Manifest drafted | planner=%s | memory=%sMB | cpu=%s | time=%ss",
+        "Manifest drafted | planner=%s | memory=%sMB | cpu=%s | time=%ss | network=%s | notes=%d",
         source,
         manifest["memory_mb"],
         manifest["cpu_cores"],
         manifest["time_seconds"],
+        manifest["network_domains"],
+        len(notes),
     )
     return manifest, source
-
-
-def _integer(value, default):
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return default
-
-
-def _number(value, default):
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return default
 
 
 def audit_report(manifest: dict, result: dict) -> dict:
@@ -377,16 +348,10 @@ class Handler(BaseHTTPRequestHandler):
                     )
 
                 try:
-                    requested = max(
-                        5,
-                        int(body.get("time_seconds", rec["manifest"]["time_seconds"])),
-                    )
-                except (TypeError, ValueError):
-                    requested = rec["manifest"]["time_seconds"]
+                    rec["manifest"] = tighten(rec["manifest"], body)
+                except ValueError as exc:
+                    return self.send_json({"error": str(exc)}, 400)
 
-                rec["manifest"]["time_seconds"] = min(
-                    rec["manifest"]["time_seconds"], MAX_TIME, requested
-                )
                 rec["state"] = "running"
                 rec["approved_at"] = time.time()
                 rec["events"].append(

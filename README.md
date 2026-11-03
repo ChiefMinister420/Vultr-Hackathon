@@ -14,7 +14,7 @@ python3 -m venv .venv
 source .venv/bin/activate
 
 # 2. Install the project
-pip install -e .
+pip install -e '.[dev]'
 
 # 3. Activate the git hooks
 pre-commit install

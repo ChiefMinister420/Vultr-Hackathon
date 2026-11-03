@@ -10,13 +10,12 @@ readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"
 
-dependencies = [
-    "ruff==0.17.3",
-    "pre-commit==4.7.0",
-]
+dependencies = []
 
 [project.optional-dependencies]
 dev = [
+    "ruff==0.17.3",
+    "pre-commit==4.7.0",
     "pytest==9.2.0",
 ]
 

@@ -1,0 +1,25 @@
+services:
+  slipstream:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "${PORT:-8080}:8080"
+    environment:
+      PORT: 8080
+      VULTR_INFERENCE_API_KEY: ${VULTR_INFERENCE_API_KEY:-}
+      VULTR_INFERENCE_MODEL: ${VULTR_INFERENCE_MODEL:-deepseek-v4.1-flash-1017}
+      SLIPSTREAM_RUNNER_IMAGE: slipstream-runner:local
+      SANDBOX_RUNTIME: ${SANDBOX_RUNTIME:-}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      runner-image:
+        condition: service_completed_successfully
+    restart: unless-stopped
+  runner-image:
+    build:
+      context: .
+      dockerfile: sandbox/Dockerfile
+    image: slipstream-runner:local
+    entrypoint: ["/bin/true"]

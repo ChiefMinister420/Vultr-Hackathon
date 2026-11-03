@@ -13,6 +13,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 IMAGE = os.getenv("SLIPSTREAM_RUNNER_IMAGE", "slipstream-runner:local")
+PROXY_IMAGE = os.getenv("SLIPSTREAM_PROXY_IMAGE", "slipstream-proxy:local")
 
 
 def docker_ready() -> bool:
@@ -28,10 +29,10 @@ def docker_ready() -> bool:
     )
 
 
-def image_present() -> bool:
+def image_present(image: str = IMAGE) -> bool:
     return (
         subprocess.run(
-            ["docker", "image", "inspect", IMAGE],
+            ["docker", "image", "inspect", image],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             timeout=10,
@@ -56,13 +57,23 @@ def execute_csv(task: str, manifest: dict) -> dict:
             f"docker build -t {IMAGE} -f sandbox/Dockerfile ."
         )
 
+    domains = list(manifest.get("network_domains") or [])
+    if domains and not image_present(PROXY_IMAGE):
+        raise RuntimeError(
+            f"Proxy image {PROXY_IMAGE} not found. No code was run; build it with: "
+            f"docker build -t {PROXY_IMAGE} -f proxy/Dockerfile ."
+        )
+
     # The limits passed to Docker; the audit report reads this same dict.
     limits = {
         "memory_mb": int(manifest["memory_mb"]),
         "cpu_cores": float(manifest["cpu_cores"]),
         "time_seconds": min(int(manifest["time_seconds"]), 60),
+        "network_domains": domains,
     }
-    name = f"slipstream-{uuid.uuid4().hex[:12]}"
+    # One id names the runner, its proxy and its network.
+    run_id = uuid.uuid4().hex[:12]
+    name = f"slipstream-{run_id}"
     runtime = os.getenv("SANDBOX_RUNTIME", "").strip()
     engine = "Docker" + (f" / {runtime}" if runtime else "")
 
@@ -87,7 +98,7 @@ def execute_csv(task: str, manifest: dict) -> dict:
             "--name",
             name,
             "--network",
-            "none",
+            f"sbx-{run_id}" if domains else "none",
             "--read-only",
             "--cap-drop",
             "ALL",
@@ -110,26 +121,40 @@ def execute_csv(task: str, manifest: dict) -> dict:
         ]
         if runtime:
             cmd[2:2] = ["--runtime", runtime]
+        if domains:
+            proxy_url = f"http://proxy-{run_id}:3128"
+            for var in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"):
+                cmd += ["-e", f"{var}={proxy_url}"]
         cmd += [IMAGE, "--task", task[:2000]]
-        started = time.monotonic()
         try:
-            proc = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=limits["time_seconds"],
-            )
-        except subprocess.TimeoutExpired:
-            subprocess.run(["docker", "kill", name], capture_output=True)
+            if domains:
+                _start_proxy(run_id, domains)
+            started = time.monotonic()
+            try:
+                proc = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=limits["time_seconds"],
+                )
+            except subprocess.TimeoutExpired:
+                subprocess.run(["docker", "kill", name], capture_output=True)
+                proc = None
+            elapsed = round(time.monotonic() - started, 2)
+        finally:
+            net_events = _stop_proxy(run_id) if domains else []
+
+        if proc is None:
             return {
                 "status": "timeout",
                 "stdout": "",
                 "stderr": f"Execution exceeded {limits['time_seconds']} seconds.",
-                "elapsed_seconds": round(time.monotonic() - started, 2),
+                "elapsed_seconds": elapsed,
                 "artifact": None,
                 "engine": engine,
                 "killed": True,
                 "limits": limits,
+                "net_events": net_events,
             }
         artifact = None
         report = out / "report.json"
@@ -139,12 +164,121 @@ def execute_csv(task: str, manifest: dict) -> dict:
             "status": "completed" if proc.returncode == 0 else "failed",
             "stdout": proc.stdout[-12000:],
             "stderr": proc.stderr[-3000:],
-            "elapsed_seconds": round(time.monotonic() - started, 2),
+            "elapsed_seconds": elapsed,
             "artifact": artifact,
             "engine": engine,
             "killed": False,
             "limits": limits,
+            "net_events": net_events,
         }
+
+
+def _docker(*args: str) -> subprocess.CompletedProcess:
+    proc = subprocess.run(["docker", *args], capture_output=True, text=True, timeout=30)
+    if proc.returncode != 0:
+        raise RuntimeError(f"docker {' '.join(args[:2])} failed: {proc.stderr.strip()[:300]}")
+    return proc
+
+
+def _start_proxy(run_id: str, domains: list[str]) -> None:
+    """Create the run's internal network and its allowlisting proxy, the only way out."""
+    network, proxy = f"sbx-{run_id}", f"proxy-{run_id}"
+    _docker("network", "create", "--internal", "--label", "slipstream=1", network)
+    _docker(
+        "run",
+        "-d",
+        "--name",
+        proxy,
+        "--network",
+        network,
+        "-e",
+        f"ALLOW={','.join(domains)}",
+        "--read-only",
+        "--cap-drop",
+        "ALL",
+        "--security-opt",
+        "no-new-privileges",
+        "--pids-limit",
+        "64",
+        "--memory",
+        "64m",
+        "--memory-swap",
+        "64m",
+        "--label",
+        "slipstream=1",
+        PROXY_IMAGE,
+    )
+    _docker("network", "connect", "bridge", proxy)
+
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        if "READY" in _docker("logs", proxy).stdout:
+            return
+        time.sleep(0.2)
+    raise RuntimeError("Network proxy did not report READY within 5 seconds. No code was run.")
+
+
+def _stop_proxy(run_id: str) -> list[dict]:
+    """Collect proxy logs, then remove the proxy and network. Never raises."""
+    network, proxy = f"sbx-{run_id}", f"proxy-{run_id}"
+    try:
+        logs = subprocess.run(
+            ["docker", "logs", proxy], capture_output=True, text=True, timeout=10
+        ).stdout
+    except (OSError, subprocess.SubprocessError):
+        logs = ""
+    try:
+        # The runner is normally gone already (--rm); this covers kills and crashes.
+        subprocess.run(
+            ["docker", "rm", "-f", proxy, f"slipstream-{run_id}"], capture_output=True, timeout=30
+        )
+        # A killed runner may still be detaching from the network; retry briefly.
+        for _ in range(10):
+            removed = subprocess.run(
+                ["docker", "network", "rm", network], capture_output=True, timeout=30
+            )
+            if removed.returncode == 0:
+                break
+            time.sleep(0.3)
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return _parse_events(logs)
+
+
+def _parse_events(logs: str) -> list[dict]:
+    events = []
+    for line in logs.splitlines():
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(event, dict) and "allowed" in event:
+            events.append(event)
+    return events
+
+
+def cleanup_stale() -> int:
+    """Remove containers and networks labelled slipstream=1 left by an interrupted run."""
+    if not docker_ready():
+        return 0
+
+    def ids(*args):
+        proc = subprocess.run(["docker", *args], capture_output=True, text=True, timeout=30)
+        return proc.stdout.split()
+
+    containers = ids("ps", "-a", "--format", "{{.Names}}", "--filter", "label=slipstream=1")
+    networks = ids("network", "ls", "-q", "--filter", "label=slipstream=1")
+    for network in networks:
+        # Runner containers carry no label; anything still attached to our network is ours.
+        containers += ids(
+            "network", "inspect", "-f", "{{range .Containers}}{{.Name}} {{end}}", network
+        )
+    containers = list(dict.fromkeys(containers))
+    if containers:
+        subprocess.run(["docker", "rm", "-f", *containers], capture_output=True, timeout=60)
+    if networks:
+        subprocess.run(["docker", "network", "rm", *networks], capture_output=True, timeout=60)
+    return len(containers) + len(networks)
 
 
 def _local_dev_execute(task: str) -> dict:

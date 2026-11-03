@@ -25,7 +25,10 @@ cp .env.example .env
 # 5. Build the sandbox runner image
 docker build -t slipstream-runner:local -f sandbox/Dockerfile .
 
-# 6. Start the server
+# 6. Build the network proxy image (used only by runs with allowed network domains)
+docker build -t slipstream-proxy:local -f proxy/Dockerfile .
+
+# 7. Start the server
 python3 -m app.server
 ```
 

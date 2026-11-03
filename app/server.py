@@ -13,7 +13,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from app.policy import apply_policy, tighten
-from app.runner import docker_ready, execute_csv
+from app.runner import cleanup_stale, docker_ready, execute_csv
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -220,17 +220,34 @@ def infer_manifest(task: str) -> tuple[dict, str]:
 def audit_report(manifest: dict, result: dict) -> dict:
     # Limits come from what the runner passed to Docker, not from the manifest.
     limits = result.get("limits") or {}
+    domains = limits.get("network_domains") or []
+    events = result.get("net_events") or []
+    used_hosts = sorted({e.get("host") for e in events if e.get("allowed")})
+    blocked = [
+        {"host": e.get("host"), "port": e.get("port"), "reason": e.get("reason")}
+        for e in events
+        if not e.get("allowed")
+    ]
+
     if result.get("killed"):
         cleanup = "Ephemeral container created, killed at its time limit, and removed."
     elif result.get("engine", "").startswith("Docker"):
         cleanup = "Ephemeral container removed after run."
     else:
         cleanup = "No container was created."
+    if domains:
+        cleanup += " Proxy container and internal network removed."
 
     return {
         "allowed": manifest,
+        "network": {
+            "mode": "allowlist proxy" if domains else "denied (--network none)",
+            "allowed": domains,
+            "used": used_hosts,
+            "blocked": blocked,
+        },
         "used": {
-            "network_domains": [],
+            "network_domains": used_hosts,
             # This is an artifact-based indicator, not syscall-level
             # measurement of file access.
             "files": (
@@ -245,7 +262,7 @@ def audit_report(manifest: dict, result: dict) -> dict:
             "cpu_limit_cores": limits.get("cpu_cores"),
             "elapsed_seconds": result.get("elapsed_seconds"),
         },
-        "blocked_attempts": [],
+        "blocked_attempts": blocked,
         "cleanup": cleanup,
     }
 
@@ -419,5 +436,9 @@ class Handler(BaseHTTPRequestHandler):
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", "8080"))
+    try:
+        logger.info("Removed %d stale sandbox resource(s).", cleanup_stale())
+    except Exception:
+        logger.exception("Stale sandbox cleanup failed; continuing.")
     logger.info("Slipstream listening on http://0.0.0.0:%s", port)
     ThreadingHTTPServer(("0.0.0.0", port), Handler).serve_forever()

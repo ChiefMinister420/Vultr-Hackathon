@@ -1,0 +1,10 @@
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.17.3
+    hooks:
+      # Automatically fix linting issues
+      - id: ruff
+        args: [--fix, --unsafe-fixes]
+
+      # Format Python files
+      - id: ruff-format

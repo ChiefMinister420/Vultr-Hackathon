@@ -1,0 +1,51 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "slipstream"
+version = "0.1.0"
+description = "A permission and policy enforcement layer for AI agent execution."
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+
+dependencies = [
+    "ruff==0.17.3",
+    "pre-commit==4.7.0",
+]
+
+[tool.setuptools.packages.find]
+include = ["app*"]
+
+# Ruff
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["."]
+extend-exclude = [
+    ".venv",
+    "venv",
+    "build",
+    "dist",
+    ".git",
+]
+
+[tool.ruff.lint]
+select = [
+    "E",
+    "F",
+    "I",
+    "UP",
+    "B",
+    "SIM",
+]
+fixable = ["ALL"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+# Pre-commit and development tooling
+[tool.ruff.lint.isort]
+known-first-party = ["app", "sandbox"]

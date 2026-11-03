@@ -6,12 +6,36 @@
 
 ## Run locally
 
-Requirements: Python 3.11+ and Docker Desktop/Engine. For inference-backed planning, set `VULTR_INFERENCE_API_KEY` and optionally `VULTR_INFERENCE_MODEL` (default `deepseek-v4.1-flash-1017`).
+Requirements: Python 3.11+ and Docker Desktop/Engine.
 
 ```sh
-cp .env.example .env   # optional; add your inference key
+# 1. Create and activate a virtualenv
+python3 -m venv .venv
+source .venv/bin/activate
+
+# 2. Install the project
+pip install -e .
+
+# 3. Activate the git hooks
+pre-commit install
+
+# 4. Configure environment
+cp .env.example .env
+
+# 5. Build the sandbox runner image
 docker build -t slipstream-runner:local -f sandbox/Dockerfile .
+
+# 6. Start the server
 python3 -m app.server
+```
+
+On Linux, make sure your user can reach the Docker socket without `sudo` — `docker info`
+should succeed unprivileged. If it only works under `sudo`, add yourself to the `docker`
+group and start a fresh shell:
+
+```sh
+sudo usermod -aG docker "$USER"
+newgrp docker
 ```
 
 Open http://localhost:8080. Try “Analyze the sample sales CSV and show the top 5 products by revenue.” Review and approve the permission card, then watch the execution events and report. The sample dataset lives at `/workspace/input/sales.csv` inside the runner.

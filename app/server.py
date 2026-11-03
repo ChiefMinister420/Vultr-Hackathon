@@ -246,6 +246,39 @@ def _number(value, default):
         return default
 
 
+def audit_report(manifest: dict, result: dict) -> dict:
+    # Limits come from what the runner passed to Docker, not from the manifest.
+    limits = result.get("limits") or {}
+    if result.get("killed"):
+        cleanup = "Ephemeral container created, killed at its time limit, and removed."
+    elif result.get("engine", "").startswith("Docker"):
+        cleanup = "Ephemeral container removed after run."
+    else:
+        cleanup = "No container was created."
+
+    return {
+        "allowed": manifest,
+        "used": {
+            "network_domains": [],
+            # This is an artifact-based indicator, not syscall-level
+            # measurement of file access.
+            "files": (
+                [
+                    "/workspace/input/sales.csv:read",
+                    "/workspace/output/report.json:write",
+                ]
+                if result.get("artifact")
+                else []
+            ),
+            "memory_limit_mb": limits.get("memory_mb"),
+            "cpu_limit_cores": limits.get("cpu_cores"),
+            "elapsed_seconds": result.get("elapsed_seconds"),
+        },
+        "blocked_attempts": [],
+        "cleanup": cleanup,
+    }
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, *_args):
         # We use structured application logs instead of the default HTTP access log.
@@ -403,31 +436,7 @@ class Handler(BaseHTTPRequestHandler):
                         ),
                     }
                 )
-                rec["report"] = {
-                    "allowed": manifest,
-                    "used": {
-                        "network_domains": [],
-                        # This is an artifact-based indicator, not syscall-level
-                        # measurement of file access.
-                        "files": (
-                            [
-                                "/workspace/input/sales.csv:read",
-                                "/workspace/output/report.json:write",
-                            ]
-                            if result.get("artifact")
-                            else []
-                        ),
-                        "memory_limit_mb": manifest["memory_mb"],
-                        "cpu_limit_cores": manifest["cpu_cores"],
-                        "elapsed_seconds": result.get("elapsed_seconds"),
-                    },
-                    "blocked_attempts": [],
-                    "cleanup": (
-                        "Ephemeral container removed after run."
-                        if result.get("engine", "").startswith("Docker")
-                        else "No container was created."
-                    ),
-                }
+                rec["report"] = audit_report(manifest, result)
 
         except Exception as exc:
             logger.exception("Execution failed | run_id=%s", rid)

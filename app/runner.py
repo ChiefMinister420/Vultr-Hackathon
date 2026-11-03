@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import tempfile
 import time
+import uuid
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -27,6 +28,18 @@ def docker_ready() -> bool:
     )
 
 
+def image_present() -> bool:
+    return (
+        subprocess.run(
+            ["docker", "image", "inspect", IMAGE],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=10,
+        ).returncode
+        == 0
+    )
+
+
 def execute_csv(task: str, manifest: dict) -> dict:
     """Execute a constrained CSV job in a disposable container."""
     if not docker_ready():
@@ -35,6 +48,23 @@ def execute_csv(task: str, manifest: dict) -> dict:
                 "Docker is unavailable. No code was run; start Docker and build the runner image."
             )
         return _local_dev_execute(task)
+
+    # Fail fast so a missing image is never pulled inside the run's time limit.
+    if not image_present():
+        raise RuntimeError(
+            f"Runner image {IMAGE} not found. No code was run; build it with: "
+            f"docker build -t {IMAGE} -f sandbox/Dockerfile ."
+        )
+
+    # The limits passed to Docker; the audit report reads this same dict.
+    limits = {
+        "memory_mb": int(manifest["memory_mb"]),
+        "cpu_cores": float(manifest["cpu_cores"]),
+        "time_seconds": min(int(manifest["time_seconds"]), 60),
+    }
+    name = f"slipstream-{uuid.uuid4().hex[:12]}"
+    runtime = os.getenv("SANDBOX_RUNTIME", "").strip()
+    engine = "Docker" + (f" / {runtime}" if runtime else "")
 
     with tempfile.TemporaryDirectory(prefix="slipstream-") as td:
         base = Path(td)
@@ -55,7 +85,7 @@ def execute_csv(task: str, manifest: dict) -> dict:
             "run",
             "--rm",
             "--name",
-            f"slipstream-{int(time.time())}",
+            name,
             "--network",
             "none",
             "--read-only",
@@ -66,9 +96,11 @@ def execute_csv(task: str, manifest: dict) -> dict:
             "--pids-limit",
             "64",
             "--memory",
-            "512m",
+            f"{limits['memory_mb']}m",
+            "--memory-swap",
+            f"{limits['memory_mb']}m",
             "--cpus",
-            "1",
+            str(limits["cpu_cores"]),
             "--tmpfs",
             "/tmp:rw,noexec,nosuid,size=32m",
             "-v",
@@ -76,7 +108,6 @@ def execute_csv(task: str, manifest: dict) -> dict:
             "-v",
             f"{out}:/workspace/output:rw,Z",
         ]
-        runtime = os.getenv("SANDBOX_RUNTIME", "").strip()
         if runtime:
             cmd[2:2] = ["--runtime", runtime]
         cmd += [IMAGE, "--task", task[:2000]]
@@ -86,16 +117,19 @@ def execute_csv(task: str, manifest: dict) -> dict:
                 cmd,
                 capture_output=True,
                 text=True,
-                timeout=min(int(manifest["time_seconds"]), 60),
+                timeout=limits["time_seconds"],
             )
         except subprocess.TimeoutExpired:
-            subprocess.run(["docker", "kill", cmd[cmd.index("--name") + 1]], capture_output=True)
+            subprocess.run(["docker", "kill", name], capture_output=True)
             return {
                 "status": "timeout",
                 "stdout": "",
-                "stderr": "Execution exceeded 60 seconds.",
+                "stderr": f"Execution exceeded {limits['time_seconds']} seconds.",
                 "elapsed_seconds": round(time.monotonic() - started, 2),
                 "artifact": None,
+                "engine": engine,
+                "killed": True,
+                "limits": limits,
             }
         artifact = None
         report = out / "report.json"
@@ -107,7 +141,9 @@ def execute_csv(task: str, manifest: dict) -> dict:
             "stderr": proc.stderr[-3000:],
             "elapsed_seconds": round(time.monotonic() - started, 2),
             "artifact": artifact,
-            "engine": "Docker" + (f" / {runtime}" if runtime else ""),
+            "engine": engine,
+            "killed": False,
+            "limits": limits,
         }
 
 

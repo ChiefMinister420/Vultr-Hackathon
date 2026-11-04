@@ -2,13 +2,22 @@ import argparse
 import csv
 import json
 import os
+import runpy
+import sys
 from pathlib import Path
 
 
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--task", default="")
-    p.parse_args()
+    p.add_argument("--script", help="run this script (a model-written task.py) instead")
+    args = p.parse_args()
+    if args.script:
+        # Keep everything the script creates removable by the host's temp-dir cleanup.
+        os.umask(0)
+        sys.argv = [args.script]
+        runpy.run_path(args.script, run_name="__main__")
+        return
     input_path = Path(os.getenv("SLIPSTREAM_INPUT", "/workspace/input/sales.csv"))
     output_path = Path(os.getenv("SLIPSTREAM_OUTPUT", "/workspace/output/report.json"))
     with open(input_path, newline="", encoding="utf-8") as fh:

@@ -59,6 +59,11 @@
               <div class="resource">/workspace/input/sales.csv <small>read</small><br>/workspace/output/report.json <small>write</small></div>
             </div>
           </div>
+          <div class="hint" id="mode"></div>
+          <details id="script-box" class="hidden">
+            <summary class="hint">Model-written script (runs in the sandbox under this manifest; approval does not change it)</summary>
+            <div class="report"><pre id="script"></pre></div>
+          </details>
           <div class="buttons">
             <button class="approve" id="approve">Approve &amp; run</button>
             <button class="reject" id="reject">Reject</button>
@@ -84,6 +89,12 @@
             <div class="label">Task output</div>
             <div id="chart" class="chart"></div>
             <div id="table" class="table"></div>
+          </div>
+          <div class="report">
+            <div class="label">Attempts</div>
+            <pre id="attempts"></pre>
+            <div class="label">Final output (stdout of the last attempt)</div>
+            <pre id="final"></pre>
           </div>
           <div class="report">
             <div class="label">Run report · allowed / used / blocked</div>

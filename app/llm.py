@@ -115,7 +115,9 @@ def status() -> dict:
     }
 
 
-def chat(messages, *, purpose, max_tokens=None, temperature=None, timeout=None) -> LLMResult:
+def chat(
+    messages, *, purpose, max_tokens=None, temperature=None, timeout=None, reasoning_effort=None
+) -> LLMResult:
     """Send one chat completion. Only choices[0].message.content is used; reasoning is ignored."""
     cfg = settings()
     if cfg is None:
@@ -130,8 +132,10 @@ def chat(messages, *, purpose, max_tokens=None, temperature=None, timeout=None) 
     if max_tokens is not None:
         payload[cfg["token_field"]] = max_tokens
     if cfg["provider"] == "groq" and cfg["model"].startswith("openai/gpt-oss"):
-        payload["reasoning_effort"] = os.getenv("LLM_REASONING_EFFORT", "").strip() or (
-            DEFAULT_EFFORT.get(purpose, "low")
+        payload["reasoning_effort"] = (
+            reasoning_effort
+            or os.getenv("LLM_REASONING_EFFORT", "").strip()
+            or DEFAULT_EFFORT.get(purpose, "low")
         )
     payload["messages"] = messages
 

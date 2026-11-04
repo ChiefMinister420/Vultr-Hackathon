@@ -97,7 +97,7 @@ def test_resource_clamps(draft, expected):
 
 @pytest.fixture
 def api(monkeypatch):
-    def fake_execute(task, manifest):
+    def fake_execute(task, manifest, script=None):
         return {"status": "completed", "engine": "Docker", "elapsed_seconds": 0, "limits": {}}
 
     monkeypatch.setattr(server, "execute_csv", fake_execute)

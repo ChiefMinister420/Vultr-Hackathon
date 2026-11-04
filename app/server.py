@@ -10,11 +10,15 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from app import llm
+from app import codegen, llm
 from app.policy import apply_policy, tighten
 from app.runner import cleanup_stale, docker_ready, execute_csv
 
 ROOT = Path(__file__).resolve().parents[1]
+SAMPLE_CSV = ROOT / "examples" / "sales.csv"
+MODEL_WRITTEN = "model-written"
+BUILTIN = "builtin"
+MAX_ATTEMPTS = 3
 
 RUNS = {}
 LOCK = threading.Lock()
@@ -124,7 +128,7 @@ def infer_manifest(task: str) -> tuple[dict, str, dict]:
             )
             raw = result.text
 
-            logger.info("%s raw response: %s", preset["short"], raw[:2000])
+            logger.debug("%s raw response: %s", preset["short"], raw[:2000])
 
             match = re.search(r"\{[\s\S]*\}", raw)
             if not match:
@@ -180,11 +184,52 @@ def infer_manifest(task: str) -> tuple[dict, str, dict]:
     return manifest, source, planned_by
 
 
-def audit_report(manifest: dict, result: dict, planner: dict | None = None) -> dict:
+def generate(task: str, manifest: dict, previous_script=None, error=None) -> tuple[str, dict]:
+    """Ask the configured model for a script; return it with who wrote it."""
+    config = llm.status()
+    if not config["configured"] or config["error"]:
+        raise codegen.CodegenError(config["error"] or "No LLM provider is configured.")
+    script = codegen.generate_script(
+        task,
+        codegen.RUNNER_MODULES,
+        codegen.preview_csv(SAMPLE_CSV),
+        previous_script=previous_script,
+        error=error,
+        network_domains=manifest["network_domains"],
+    )
+    return script, {"provider": config["provider"], "model": config["model"]}
+
+
+def attempt_record(number: int, mode: str, written_by: dict, script, result: dict) -> dict:
+    model_written = mode == MODEL_WRITTEN
+    return {
+        "attempt": number,
+        "mode": mode,
+        "provider": written_by.get("provider") if model_written else BUILTIN,
+        "model": written_by.get("model") if model_written else "analyze.py",
+        "status": result.get("status"),
+        "exit_code": result.get("exit_code"),
+        "killed": bool(result.get("killed")),
+        "elapsed_seconds": result.get("elapsed_seconds"),
+        "container": result.get("container"),
+        "stdout": (result.get("stdout") or "")[-4096:],
+        "stderr": (result.get("stderr") or "")[-4096:],
+        "script": script if model_written else None,
+        "limits": result.get("limits"),
+        "net_events": result.get("net_events") or [],
+    }
+
+
+def audit_report(
+    manifest: dict, result: dict, planner: dict | None = None, attempts: list | None = None
+) -> dict:
     # Limits come from what the runner passed to Docker, not from the manifest.
     limits = result.get("limits") or {}
     domains = limits.get("network_domains") or []
-    events = result.get("net_events") or []
+    if attempts:
+        events = [event for attempt in attempts for event in attempt["net_events"]]
+    else:
+        events = result.get("net_events") or []
     used_hosts = sorted({e.get("host") for e in events if e.get("allowed")})
     blocked = [
         {"host": e.get("host"), "port": e.get("port"), "reason": e.get("reason")}
@@ -200,8 +245,10 @@ def audit_report(manifest: dict, result: dict, planner: dict | None = None) -> d
         cleanup = "No container was created."
     if domains:
         cleanup += " Proxy container and internal network removed."
+    if attempts and len(attempts) > 1:
+        cleanup = f"{len(attempts)} attempts, each in a fresh container. Last attempt: {cleanup}"
 
-    return {
+    report = {
         "allowed": manifest,
         "network": {
             "mode": "allowlist proxy" if domains else "denied (--network none)",
@@ -224,11 +271,34 @@ def audit_report(manifest: dict, result: dict, planner: dict | None = None) -> d
             "memory_limit_mb": limits.get("memory_mb"),
             "cpu_limit_cores": limits.get("cpu_cores"),
             "elapsed_seconds": result.get("elapsed_seconds"),
+            "output_files": result.get("files") or [],
         },
         "blocked_attempts": blocked,
         "cleanup": cleanup,
         "planner": _planner_info(planner),
     }
+    if attempts:
+        # Every attempt's limits come from the dict the runner passed to Docker.
+        report["attempts"] = [
+            {
+                key: attempt[key]
+                for key in (
+                    "attempt",
+                    "mode",
+                    "provider",
+                    "model",
+                    "status",
+                    "exit_code",
+                    "killed",
+                    "elapsed_seconds",
+                    "container",
+                    "limits",
+                )
+            }
+            for attempt in attempts
+        ]
+        report["identical_limits"] = all(a["limits"] == attempts[0]["limits"] for a in attempts)
+    return report
 
 
 def _planner_info(planner: dict | None) -> dict:
@@ -300,6 +370,21 @@ class Handler(BaseHTTPRequestHandler):
             manifest, planner, planned_by = infer_manifest(task)
             mid = secrets.token_urlsafe(12)
 
+            # The script is stored with this manifest ID; approval can never replace it.
+            mode, script, written_by, codegen_error = BUILTIN, None, None, None
+            if llm.status()["configured"]:
+                try:
+                    script, written_by = generate(task, manifest)
+                    mode = MODEL_WRITTEN
+                except Exception as exc:
+                    codegen_error = str(exc)[:500]
+                    logger.warning("Code generation failed; using built-in analysis: %s", exc)
+            mode_text = (
+                f"Script written by {written_by['provider']} ({written_by['model']})."
+                if mode == MODEL_WRITTEN
+                else "Built-in analysis (analyze.py) will run; no model-written code."
+            )
+
             record = {
                 "id": mid,
                 "task": task[:2000],
@@ -308,13 +393,18 @@ class Handler(BaseHTTPRequestHandler):
                 "provider": planned_by["provider"],
                 "model": planned_by["model"],
                 "finish_reason": planned_by["finish_reason"],
+                "mode": mode,
+                "script": script,
+                "codegen": written_by,
+                "codegen_error": codegen_error,
                 "state": "awaiting_approval",
                 "events": [
                     {
                         "at": time.time(),
                         "kind": "plan",
                         "text": f"Manifest drafted by {planner}.",
-                    }
+                    },
+                    {"at": time.time(), "kind": "plan", "text": mode_text},
                 ],
             }
 
@@ -334,6 +424,15 @@ class Handler(BaseHTTPRequestHandler):
                 if rec["state"] != "awaiting_approval":
                     return self.send_json(
                         {"error": "Manifest is no longer awaiting approval."}, 409
+                    )
+
+                if any(key in body for key in ("script", "code", "mode")):
+                    return self.send_json(
+                        {
+                            "error": "Approval covers the permission manifest; "
+                            "it cannot supply or change code."
+                        },
+                        400,
                     )
 
                 try:
@@ -363,35 +462,69 @@ class Handler(BaseHTTPRequestHandler):
             task = rec["task"]
             manifest = rec["manifest"]
             planned_by = {"provider": rec.get("provider"), "model": rec.get("model")}
+            mode = rec.get("mode", BUILTIN)
+            script = rec.get("script")
+            written_by = rec.get("codegen") or {}
+            attempts = rec["attempts"] = []
 
-        logger.info("Starting execution | run_id=%s", rid)
+        logger.info("Starting execution | run_id=%s | mode=%s", rid, mode)
+        regen_error = None
 
         try:
-            result = execute_csv(task, manifest)
-            logger.info("Full runner result: %s", json.dumps(result, default=str)[:4000])
-            logger.info(
-                "Execution finished | run_id=%s | status=%s | engine=%s | elapsed=%ss",
-                rid,
-                result.get("status"),
-                result.get("engine", "unknown"),
-                result.get("elapsed_seconds", 0),
-            )
+            for number in range(1, MAX_ATTEMPTS + 1):
+                result = execute_csv(task, manifest, script if mode == MODEL_WRITTEN else None)
+                # Debug only: stdout comes from model-written code.
+                logger.debug("Full runner result: %s", json.dumps(result, default=str)[:4000])
+                logger.info(
+                    "Attempt finished | run_id=%s | attempt=%d | status=%s | exit_code=%s | "
+                    "engine=%s | elapsed=%ss",
+                    rid,
+                    number,
+                    result.get("status"),
+                    result.get("exit_code"),
+                    result.get("engine", "unknown"),
+                    result.get("elapsed_seconds", 0),
+                )
+
+                with LOCK:
+                    attempts.append(attempt_record(number, mode, written_by, script, result))
+                    rec["events"].append(
+                        {
+                            "at": time.time(),
+                            "kind": "runner",
+                            "text": (
+                                f"Attempt {number}: {result.get('engine', 'Docker')} execution "
+                                f"{result['status']} in "
+                                f"{result.get('elapsed_seconds', 0)}s."
+                            ),
+                        }
+                    )
+
+                if result["status"] == "completed" or mode != MODEL_WRITTEN:
+                    break
+                if number == MAX_ATTEMPTS:
+                    break
+                try:
+                    script, written_by = generate(
+                        task, manifest, previous_script=script, error=result.get("stderr")
+                    )
+                except Exception as exc:
+                    regen_error = f"Code generation failed before attempt {number + 1}: {exc}"
+                    logger.warning("%s | run_id=%s", regen_error, rid)
+                    with LOCK:
+                        rec["events"].append(
+                            {"at": time.time(), "kind": "error", "text": regen_error[:300]}
+                        )
+                    break
 
             with LOCK:
                 rec["result"] = result
                 rec["state"] = result["status"]
-                rec["events"].append(
-                    {
-                        "at": time.time(),
-                        "kind": "runner",
-                        "text": (
-                            f"{result.get('engine', 'Docker')} execution "
-                            f"{result['status']} in "
-                            f"{result.get('elapsed_seconds', 0)}s."
-                        ),
-                    }
-                )
-                rec["report"] = audit_report(manifest, result, planned_by)
+                rec["final_answer"] = attempts[-1]["stdout"]
+                rec["output_files"] = result.get("files") or []
+                if regen_error:
+                    rec["error"] = regen_error
+                rec["report"] = audit_report(manifest, result, planned_by, attempts)
 
         except Exception as exc:
             logger.exception("Execution failed | run_id=%s", rid)

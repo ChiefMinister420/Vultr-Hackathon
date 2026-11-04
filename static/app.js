@@ -79,10 +79,36 @@ function updateInferenceIndicator(inference) {
   label.textContent = `${name} CONFIGURED · NOT TESTED · ${inference.model}`;
 }
 
+function providerLabel(provider, model) {
+  if (provider === 'vultr') return `Vultr Serverless Inference (${model})`;
+  if (provider === 'groq') return `DEV ONLY: Groq (${model}), not the submission provider`;
+  return 'Built-in analyze.py';
+}
+
 function plannerLabel(plan) {
-  if (plan.provider === 'vultr') return `Planner: Vultr Serverless Inference (${plan.model})`;
-  if (plan.provider === 'groq') return `DEV ONLY: Groq (${plan.model}), not the submission provider`;
+  if (plan.provider === 'vultr') return `Planner: ${providerLabel(plan.provider, plan.model)}`;
+  if (plan.provider === 'groq') return providerLabel(plan.provider, plan.model);
   return 'Planned by ' + plan.planner;
+}
+
+function renderMode(plan) {
+  if (plan.mode === 'model-written') {
+    $('mode').textContent = 'Code: model-written by ' + providerLabel(plan.codegen.provider, plan.codegen.model);
+    $('script').textContent = plan.script;
+    $('script-box').classList.remove('hidden');
+  } else {
+    $('mode').textContent = 'Code: built-in analyze.py (no model-written code)'
+      + (plan.codegen_error ? ' · generation failed: ' + plan.codegen_error : '');
+    $('script-box').classList.add('hidden');
+  }
+}
+
+function renderAttempts(run) {
+  $('attempts').textContent = (run.attempts || []).map((a) =>
+    `#${a.attempt} ${a.status} · exit ${a.exit_code ?? '-'}${a.killed ? ' (killed)' : ''} · `
+    + `${a.elapsed_seconds}s · ${providerLabel(a.provider, a.model)}`
+  ).join('\n') || 'No attempt ran.';
+  $('final').textContent = run.final_answer || '(no output)';
 }
 
 updateHealth();
@@ -96,6 +122,7 @@ $('plan').onclick = async () => {
     current = await api('/api/plan', { task: $('task').value });
 
     $('planner').textContent = plannerLabel(current);
+    renderMode(current);
     $('time').value = current.manifest.time_seconds;
     $('time').max = current.manifest.time_seconds;
     $('manifest').classList.remove('hidden');
@@ -152,7 +179,10 @@ async function refresh(id) {
       $('state').textContent = run.state.toUpperCase();
       $('dot').className = 'dot';
 
+      $('chart').innerHTML = '';
+      $('table').textContent = '';
       if (run.result?.artifact) renderChart(run.result.artifact);
+      renderAttempts(run);
 
       if (run.report) {
         $('output').classList.remove('hidden');
@@ -203,5 +233,5 @@ function renderChart(data) {
   `).join('');
 
   $('table').textContent =
-    `${data.rows_processed} rows · ${data.labels.length} ranked products · ${data.currency}`;
+    `${data.rows_processed ?? '?'} rows · ${data.labels.length} ranked products · ${data.currency ?? ''}`;
 }

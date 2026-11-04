@@ -41,9 +41,13 @@ def image_present(image: str = IMAGE) -> bool:
     )
 
 
-def execute_csv(task: str, manifest: dict) -> dict:
-    """Execute a constrained CSV job in a disposable container."""
+def execute_csv(task: str, manifest: dict, script: str | None = None) -> dict:
+    """Execute a constrained CSV job (built-in, or a model-written script) in a container."""
     if not docker_ready():
+        if script is not None:
+            raise RuntimeError(
+                "Docker is unavailable. Model-written scripts only run in the Docker sandbox."
+            )
         if os.getenv("SLIPSTREAM_ALLOW_UNSANDBOXED", "false").lower() != "true":
             raise RuntimeError(
                 "Docker is unavailable. No code was run; start Docker and build the runner image."
@@ -77,7 +81,8 @@ def execute_csv(task: str, manifest: dict) -> dict:
     runtime = os.getenv("SANDBOX_RUNTIME", "").strip()
     engine = "Docker" + (f" / {runtime}" if runtime else "")
 
-    with tempfile.TemporaryDirectory(prefix="slipstream-") as td:
+    # A script can create files the host user cannot delete; never fail a finished run on that.
+    with tempfile.TemporaryDirectory(prefix="slipstream-", ignore_cleanup_errors=True) as td:
         base = Path(td)
         inp, out = base / "input", base / "output"
         inp.mkdir()
@@ -87,6 +92,11 @@ def execute_csv(task: str, manifest: dict) -> dict:
         out.chmod(0o777)
         sample = ROOT / "examples" / "sales.csv"
         shutil.copyfile(sample, inp / "sales.csv")
+
+        if script is not None:
+            # Delivered through the read-only input mount, never baked into the image.
+            (inp / "task.py").write_text(script, encoding="utf-8")
+            (inp / "task.py").chmod(0o644)
 
         inp.chmod(0o755)
         (inp / "sales.csv").chmod(0o644)
@@ -125,7 +135,10 @@ def execute_csv(task: str, manifest: dict) -> dict:
             proxy_url = f"http://proxy-{run_id}:3128"
             for var in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"):
                 cmd += ["-e", f"{var}={proxy_url}"]
-        cmd += [IMAGE, "--task", task[:2000]]
+        if script is not None:
+            cmd += [IMAGE, "--script", "/workspace/input/task.py"]
+        else:
+            cmd += [IMAGE, "--task", task[:2000]]
         try:
             if domains:
                 _start_proxy(run_id, domains)
@@ -155,22 +168,51 @@ def execute_csv(task: str, manifest: dict) -> dict:
                 "killed": True,
                 "limits": limits,
                 "net_events": net_events,
+                "container": name,
+                "exit_code": None,
+                "files": _output_files(out),
             }
-        artifact = None
-        report = out / "report.json"
-        if report.exists():
-            artifact = json.loads(report.read_text())
         return {
             "status": "completed" if proc.returncode == 0 else "failed",
             "stdout": proc.stdout[-12000:],
             "stderr": proc.stderr[-3000:],
             "elapsed_seconds": elapsed,
-            "artifact": artifact,
+            "artifact": _chart_artifact(out / "report.json"),
             "engine": engine,
             "killed": False,
             "limits": limits,
             "net_events": net_events,
+            "container": name,
+            "exit_code": proc.returncode,
+            "files": _output_files(out),
         }
+
+
+def _chart_artifact(report: Path) -> dict | None:
+    # Model-written scripts may write anything; only well-formed chart data is rendered.
+    try:
+        data = json.loads(report.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    labels, values = data.get("labels"), data.get("values")
+    if not (isinstance(labels, list) and isinstance(values, list) and len(labels) == len(values)):
+        return None
+    if not all(isinstance(v, int | float) and not isinstance(v, bool) for v in values):
+        return None
+    return data
+
+
+def _output_files(out: Path) -> list[dict]:
+    files = []
+    try:
+        for path in sorted(out.rglob("*")):
+            if path.is_file() and not path.is_symlink() and len(files) < 100:
+                files.append({"name": str(path.relative_to(out)), "size": path.stat().st_size})
+    except OSError:
+        pass
+    return files
 
 
 def _docker(*args: str) -> subprocess.CompletedProcess:

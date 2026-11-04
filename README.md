@@ -54,6 +54,18 @@ Left empty, it picks `vultr` if a Vultr key is set, else `groq` if a Groq key is
 
 For a submission or production deployment, set `REQUIRE_VULTR=true`: every provider except `vultr` is refused, and the server will not start without `VULTR_INFERENCE_API_KEY`. `/api/health` reports the provider, the model and whether this guard is on.
 
+### Model-written code
+
+When a provider is configured, `/api/plan` also asks the model (`app/codegen.py`) for one self-contained Python script for the task. The prompt lists exactly what the runner image offers (Python 3.12 standard library only), the read-only input, the writable `/workspace/output/` folder and the manifest's network rule. The script is stored with the manifest ID and shown, collapsed, on the permission card.
+
+Approval covers the permission manifest, not the code: `/api/approve` cannot supply or edit a script. After approval, the script is delivered as `/workspace/input/task.py` on the read-only input mount and run by the image's Python (`analyze.py --script`) with the same flags and limits as any run. If it exits non-zero or times out, the model gets the previous script and the last 2000 characters of its error output and writes a corrected one, which runs in a fresh container under the identical limits. There are at most 3 attempts; the run stops at the first success. The run record and audit list every attempt (exit code, time, script, output) and confirm the limits were identical.
+
+`LLM_CODE_MAX_TOKENS` (default 3000) sets the code reply budget. If a reasoning model spends it all, generation retries once with low reasoning effort.
+
+**Fallback:** with no provider configured, or if generation fails at plan time, the plan is labelled built-in and the fixed `analyze.py` analysis runs instead, exactly as before. Model-written scripts never run outside Docker, even with `SLIPSTREAM_ALLOW_UNSANDBOXED=true`. The container, not any check on the code, is the security boundary.
+
+After pulling this change, rebuild the runner image (step 5 above) so it has the `--script` mode.
+
 The app also starts without Docker for UI exploration. In that mode it reports that the hardened runner is unavailable and does not execute the task. Set `SLIPSTREAM_ALLOW_UNSANDBOXED=true` only for disposable development; this explicitly disables isolation.
 
 ## What is enforced
@@ -75,6 +87,7 @@ Deploy the web/control layer on a Vultr Cloud Compute instance with Docker insta
 - `app/server.py` — HTTP API, planner, approval lifecycle, audit reports.
 - `app/policy.py` — deterministic manifest policy.
 - `app/llm.py` — provider-agnostic chat client (Vultr, Groq for development).
+- `app/codegen.py` — model-written scripts: prompt, code extraction, retries on token exhaustion.
 - `app/runner.py` — ephemeral Docker runner and capability checks.
 - `static/` — permission approval and live run dashboard.
 - `sandbox/` — minimal runner image and CSV analysis program.

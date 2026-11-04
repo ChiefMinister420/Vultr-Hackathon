@@ -7,11 +7,10 @@ import re
 import secrets
 import threading
 import time
-import urllib.error
-import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+from app import llm
 from app.policy import apply_policy, tighten
 from app.runner import cleanup_stale, docker_ready, execute_csv
 
@@ -69,97 +68,63 @@ def load_env() -> None:
 
 load_env()
 
-INFERENCE_STATUS = {
-    "configured": bool(os.getenv("VULTR_INFERENCE_API_KEY")),
+INFERENCE_STATUS = llm.status() | {
     "connected": False,
-    "model": os.getenv("VULTR_INFERENCE_MODEL", "deepseek-v4.1-flash-1017"),
     "status": "not_tested",
     "last_error": None,
     "last_checked": None,
 }
 
+PLAN_PROMPT = (
+    "Return only a compact JSON object. "
+    "No markdown or explanations. "
+    "Keys: summary, network_domains, files, memory_mb, "
+    "cpu_cores, time_seconds, secrets. "
+    "Plan a CSV analysis using the sample file. "
+    "Never request secrets or network access."
+)
 
-def infer_manifest(task: str) -> tuple[dict, str]:
-    """Use Vultr inference as a planner; sanitize every field locally."""
+
+def infer_manifest(task: str) -> tuple[dict, str, dict]:
+    """Use the configured LLM as a planner; sanitize every field locally."""
     source = "Deterministic planner"
+    planned_by = {"provider": "builtin", "model": None, "finish_reason": None}
     draft = {}
 
-    key = os.getenv("VULTR_INFERENCE_API_KEY")
-    model = os.getenv("VULTR_INFERENCE_MODEL", "deepseek-v4.1-flash-1017")
-
+    config = llm.status()
     INFERENCE_STATUS.update(
-        configured=bool(key),
-        model=model,
+        config,
         connected=False,
-        status="connecting" if key else "not_configured",
-        last_error=None,
+        status="connecting" if config["configured"] else "not_configured",
+        last_error=config["error"],
         last_checked=time.time(),
     )
 
-    if not key:
-        logger.warning("Vultr inference is not configured. Using deterministic planner.")
+    if config["error"]:
+        INFERENCE_STATUS.update(status="error")
+        logger.error("LLM configuration refused: %s Using deterministic planner.", config["error"])
+    elif not config["configured"]:
+        logger.warning("No LLM provider is configured. Using deterministic planner.")
     else:
+        provider, model = config["provider"], config["model"]
+        preset = llm.PRESETS[provider]
         started = time.monotonic()
-        logger.info("Sending planning request to Vultr inference (model=%s).", model)
+        logger.info("Sending planning request to %s (model=%s).", preset["short"], model)
 
         try:
-            payload = {
-                "model": model,
-                "temperature": 0,
-                "max_tokens": 1000,
-                "messages": [
-                    {
-                        "role": "system",
-                        "content": (
-                            "Return only a compact JSON object. "
-                            "No markdown or explanations. "
-                            "Keys: summary, network_domains, files, memory_mb, "
-                            "cpu_cores, time_seconds, secrets. "
-                            "Plan a CSV analysis using the sample file. "
-                            "Never request secrets or network access."
-                        ),
-                    },
+            result = llm.chat(
+                [
+                    {"role": "system", "content": PLAN_PROMPT},
                     {"role": "user", "content": task[:2000]},
                 ],
-            }
-
-            request = urllib.request.Request(
-                "https://api.vultrinference.com/v1/chat/completions",
-                data=json.dumps(payload).encode("utf-8"),
-                headers={
-                    "Authorization": f"Bearer {key}",
-                    "Content-Type": "application/json",
-                },
-                method="POST",
+                purpose="plan",
+                temperature=0,
+                # Reasoning models spend part of the budget before answering.
+                max_tokens=1500 if provider == "groq" else 1000,
             )
+            raw = result.text
 
-            with urllib.request.urlopen(request, timeout=12) as resp:
-                response_body = json.load(resp)
-
-            logger.info(
-                "Vultr response structure: %s",
-                json.dumps(response_body, default=str)[:4000],
-            )
-
-            choices = response_body.get("choices", [])
-            if not choices:
-                raise ValueError("Vultr response contained no choices.")
-
-            message = choices[0].get("message", {})
-            raw = message.get("content")
-
-            if not raw:
-                raise ValueError(
-                    f"Vultr returned empty content. "
-                    f"Finish reason: {choices[0].get('finish_reason')}"
-                )
-
-            raw = response_body["choices"][0]["message"]["content"]
-
-            logger.info("Vultr raw response: %s", str(raw)[:2000])
-
-            if not isinstance(raw, str):
-                raise ValueError(f"Unexpected inference content type: {type(raw).__name__}")
+            logger.info("%s raw response: %s", preset["short"], raw[:2000])
 
             match = re.search(r"\{[\s\S]*\}", raw)
             if not match:
@@ -169,38 +134,36 @@ def infer_manifest(task: str) -> tuple[dict, str]:
             if not isinstance(draft, dict):
                 raise ValueError("Inference response JSON was not an object.")
 
-            source = "Vultr Serverless Inference"
+            source = preset["label"]
+            planned_by = {
+                "provider": result.provider,
+                "model": result.model,
+                "finish_reason": result.finish_reason,
+            }
             INFERENCE_STATUS.update(
                 connected=True,
                 status="connected",
                 last_error=None,
             )
             logger.info(
-                "Vultr inference request succeeded in %.2fs (model=%s).",
+                "%s request succeeded in %.2fs (model=%s).",
+                preset["short"],
                 time.monotonic() - started,
                 model,
             )
 
-        except urllib.error.HTTPError as exc:
-            # Do not log request headers or the API key.
-            detail = f"HTTP {exc.code} {exc.reason}"
-            INFERENCE_STATUS.update(
-                connected=False,
-                status="error",
-                last_error=detail,
-            )
-            source = "Deterministic planner (Vultr inference unavailable)"
-            logger.exception("Vultr inference returned %s.", detail)
-
         except Exception as exc:
-            detail = f"{type(exc).__name__}: {exc}"[:250]
+            # LLM errors never carry request headers or the API key.
+            detail = (
+                str(exc) if isinstance(exc, llm.LLMError) else f"{type(exc).__name__}: {exc}"
+            )[:250]
             INFERENCE_STATUS.update(
                 connected=False,
                 status="error",
                 last_error=detail,
             )
-            source = "Deterministic planner (Vultr inference unavailable)"
-            logger.exception("Vultr inference request failed.")
+            source = f"Deterministic planner ({preset['short']} unavailable)"
+            logger.exception("%s request failed: %s", preset["short"], detail)
 
     # Model suggestions never expand permissions; app.policy decides the manifest.
     manifest, notes = apply_policy(draft)
@@ -214,10 +177,10 @@ def infer_manifest(task: str) -> tuple[dict, str]:
         manifest["network_domains"],
         len(notes),
     )
-    return manifest, source
+    return manifest, source, planned_by
 
 
-def audit_report(manifest: dict, result: dict) -> dict:
+def audit_report(manifest: dict, result: dict, planner: dict | None = None) -> dict:
     # Limits come from what the runner passed to Docker, not from the manifest.
     limits = result.get("limits") or {}
     domains = limits.get("network_domains") or []
@@ -264,7 +227,13 @@ def audit_report(manifest: dict, result: dict) -> dict:
         },
         "blocked_attempts": blocked,
         "cleanup": cleanup,
+        "planner": _planner_info(planner),
     }
+
+
+def _planner_info(planner: dict | None) -> dict:
+    planner = planner or {}
+    return {"provider": planner.get("provider"), "model": planner.get("model")}
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -328,7 +297,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json({"error": "Enter a task."}, 400)
 
             logger.info("Received plan request.")
-            manifest, planner = infer_manifest(task)
+            manifest, planner, planned_by = infer_manifest(task)
             mid = secrets.token_urlsafe(12)
 
             record = {
@@ -336,6 +305,9 @@ class Handler(BaseHTTPRequestHandler):
                 "task": task[:2000],
                 "manifest": manifest,
                 "planner": planner,
+                "provider": planned_by["provider"],
+                "model": planned_by["model"],
+                "finish_reason": planned_by["finish_reason"],
                 "state": "awaiting_approval",
                 "events": [
                     {
@@ -390,6 +362,7 @@ class Handler(BaseHTTPRequestHandler):
             rec = RUNS[rid]
             task = rec["task"]
             manifest = rec["manifest"]
+            planned_by = {"provider": rec.get("provider"), "model": rec.get("model")}
 
         logger.info("Starting execution | run_id=%s", rid)
 
@@ -418,7 +391,7 @@ class Handler(BaseHTTPRequestHandler):
                         ),
                     }
                 )
-                rec["report"] = audit_report(manifest, result)
+                rec["report"] = audit_report(manifest, result, planned_by)
 
         except Exception as exc:
             logger.exception("Execution failed | run_id=%s", rid)
@@ -431,11 +404,16 @@ class Handler(BaseHTTPRequestHandler):
                     "used": {},
                     "blocked_attempts": [],
                     "cleanup": "No task process was started.",
+                    "planner": _planner_info(planned_by),
                 }
 
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", "8080"))
+    try:
+        llm.settings()
+    except llm.LLMError as exc:
+        raise SystemExit(f"LLM configuration error: {exc}") from None
     try:
         logger.info("Removed %d stale sandbox resource(s).", cleanup_stale())
     except Exception:

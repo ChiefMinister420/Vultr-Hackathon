@@ -43,33 +43,46 @@ async function updateHealth() {
 function updateInferenceIndicator(inference) {
   const dot = $('inference-dot');
   const label = $('inference-label');
+  const name = inference?.provider === 'groq' ? 'GROQ (DEV ONLY)' : 'VULTR';
+
+  if (inference?.error) {
+    dot.className = 'dot error';
+    label.textContent = 'LLM CONFIG REFUSED · LOCAL PLANNER';
+    return;
+  }
 
   if (!inference || !inference.configured) {
     dot.className = 'dot';
-    label.textContent = 'VULTR NOT CONFIGURED · LOCAL PLANNER';
+    label.textContent = `${name} NOT CONFIGURED · LOCAL PLANNER`;
     return;
   }
 
   if (inference.connected) {
     dot.className = 'dot live';
-    label.textContent = `VULTR CONNECTED · ${inference.model}`;
+    label.textContent = `${name} CONNECTED · ${inference.model}`;
     return;
   }
 
   if (inference.status === 'connecting') {
     dot.className = 'dot';
-    label.textContent = 'CONNECTING TO VULTR…';
+    label.textContent = `CONNECTING TO ${name}…`;
     return;
   }
 
   if (inference.status === 'error') {
     dot.className = 'dot error';
-    label.textContent = 'VULTR UNAVAILABLE · LOCAL FALLBACK';
+    label.textContent = `${name} UNAVAILABLE · LOCAL FALLBACK`;
     return;
   }
 
   dot.className = 'dot';
-  label.textContent = `VULTR CONFIGURED · NOT TESTED · ${inference.model}`;
+  label.textContent = `${name} CONFIGURED · NOT TESTED · ${inference.model}`;
+}
+
+function plannerLabel(plan) {
+  if (plan.provider === 'vultr') return `Planner: Vultr Serverless Inference (${plan.model})`;
+  if (plan.provider === 'groq') return `DEV ONLY: Groq (${plan.model}), not the submission provider`;
+  return 'Planned by ' + plan.planner;
 }
 
 updateHealth();
@@ -82,7 +95,7 @@ $('plan').onclick = async () => {
 
     current = await api('/api/plan', { task: $('task').value });
 
-    $('planner').textContent = 'Planned by ' + current.planner;
+    $('planner').textContent = plannerLabel(current);
     $('time').value = current.manifest.time_seconds;
     $('time').max = current.manifest.time_seconds;
     $('manifest').classList.remove('hidden');

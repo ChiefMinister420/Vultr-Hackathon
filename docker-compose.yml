@@ -9,6 +9,7 @@ services:
       PORT: 8080
       VULTR_INFERENCE_API_KEY: ${VULTR_INFERENCE_API_KEY:-}
       VULTR_INFERENCE_MODEL: ${VULTR_INFERENCE_MODEL:-deepseek-v4.1-flash-1017}
+      REQUIRE_VULTR: ${REQUIRE_VULTR:-}
       SLIPSTREAM_RUNNER_IMAGE: slipstream-runner:local
       SANDBOX_RUNTIME: ${SANDBOX_RUNTIME:-}
     volumes:

@@ -1,0 +1,34 @@
+[Unit]
+Description=Slipstream control server (permission-first agent runs)
+Requires=docker.service
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=slipstream
+Group=slipstream
+SupplementaryGroups=docker
+WorkingDirectory=/opt/slipstream
+EnvironmentFile=/etc/slipstream.env
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/slipstream/.venv/bin/python -m app.server
+Restart=on-failure
+RestartSec=5
+
+# Hardening that leaves the docker CLI working. The docker group is still root-equivalent
+# on this host, so these limit mistakes in this process, not a compromise of it.
+NoNewPrivileges=true
+ProtectSystem=full
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+# PrivateTmp is deliberately off: the runner creates its input/output folders under /tmp and
+# passes them to dockerd as bind mounts. dockerd resolves those paths in the host's /tmp, so a
+# private /tmp would give every sandbox empty folders.
+
+[Install]
+WantedBy=multi-user.target

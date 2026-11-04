@@ -69,6 +69,12 @@ function updateInferenceIndicator(inference) {
     return;
   }
 
+  if (inference.status === 'capped') {
+    dot.className = 'dot error';
+    label.textContent = `${name} DAILY CALL CAP REACHED · LOCAL PLANNER`;
+    return;
+  }
+
   if (inference.status === 'error') {
     dot.className = 'dot error';
     label.textContent = `${name} UNAVAILABLE · LOCAL FALLBACK`;

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -36,6 +37,11 @@ PRESETS = {
     },
 }
 DEFAULT_EFFORT = {"plan": "low", "code": "medium"}
+DEFAULT_DAILY_CAP = 300
+
+# Provider requests made today (UTC), across all runs; guards a public deployment's budget.
+CALLS = {"day": None, "count": 0}
+CALLS_LOCK = threading.Lock()
 
 
 class LLMError(Exception):
@@ -115,6 +121,40 @@ def status() -> dict:
     }
 
 
+def daily_cap() -> int:
+    try:
+        cap = int(os.getenv("MAX_LLM_CALLS_PER_DAY", ""))
+    except ValueError:
+        return DEFAULT_DAILY_CAP
+    return cap if cap >= 0 else DEFAULT_DAILY_CAP
+
+
+def calls_today() -> dict:
+    with CALLS_LOCK:
+        _roll_day()
+        return {"used": CALLS["count"], "cap": daily_cap()}
+
+
+def cap_reached() -> bool:
+    usage = calls_today()
+    return usage["used"] >= usage["cap"]
+
+
+def _roll_day() -> None:
+    today = time.strftime("%Y-%m-%d", time.gmtime())
+    if CALLS["day"] != today:
+        CALLS.update(day=today, count=0)
+
+
+def _reserve_call() -> None:
+    with CALLS_LOCK:
+        _roll_day()
+        cap = daily_cap()
+        if CALLS["count"] >= cap:
+            raise LLMError(f"Daily model call cap ({cap}) reached; no request was sent.")
+        CALLS["count"] += 1
+
+
 def chat(
     messages, *, purpose, max_tokens=None, temperature=None, timeout=None, reasoning_effort=None
 ) -> LLMResult:
@@ -153,6 +193,7 @@ def chat(
     )
 
     for attempt in (1, 2):
+        _reserve_call()
         try:
             with urllib.request.urlopen(request, timeout=timeout or 12) as resp:
                 body = json.load(resp)

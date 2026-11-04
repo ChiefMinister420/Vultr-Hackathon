@@ -7,6 +7,7 @@ import re
 import secrets
 import threading
 import time
+from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -21,9 +22,81 @@ BUILTIN = "builtin"
 REDTEAM = "redteam"
 REDTEAM_SOURCE = {"provider": REDTEAM, "model": "app/redteam.py"}
 MAX_ATTEMPTS = 3
+MAX_TASK_CHARS = 1000
+MAX_BODY_BYTES = 16 * 1024
+MAX_RECORDS = 200
+MAX_RECORD_AGE = 2 * 60 * 60
+RATE_WINDOW = 60
+LIMITED_PATHS = ("/api/plan", "/api/redteam", "/api/approve")
+PLAN_PATHS = ("/api/plan", "/api/redteam")
 
 RUNS = {}
 LOCK = threading.Lock()
+RATE_HITS = {}
+RATE_LOCK = threading.Lock()
+
+
+def env_int(name: str, default: int) -> int:
+    try:
+        value = int(os.getenv(name, ""))
+    except ValueError:
+        return default
+    return value if value > 0 else default
+
+
+def rate_limited(ip: str, path: str) -> tuple[str, int] | None:
+    """Count one request from ip; return (message, retry seconds) when it is over a limit.
+
+    Per client and minute: RATE_LIMIT_PER_MIN plan requests (/api/plan and /api/redteam),
+    and twice that across plan, red team and approve requests together.
+    """
+    per_min = env_int("RATE_LIMIT_PER_MIN", 10)
+    limits = [("all", per_min * 2, "requests")]
+    if path in PLAN_PATHS:
+        limits.append(("plan", per_min, "plans"))
+    now = time.monotonic()
+    with RATE_LOCK:
+        if len(RATE_HITS) > 10000:
+            for key in [k for k, h in RATE_HITS.items() if not h or now - h[-1] > RATE_WINDOW]:
+                del RATE_HITS[key]
+        for bucket, limit, noun in limits:
+            hits = RATE_HITS.setdefault((ip, bucket), deque())
+            while hits and now - hits[0] > RATE_WINDOW:
+                hits.popleft()
+            if len(hits) >= limit:
+                retry = int(RATE_WINDOW - (now - hits[0])) + 1
+                return (
+                    f"Rate limit reached: at most {limit} {noun} per minute from one client. "
+                    f"Try again in {retry}s.",
+                    retry,
+                )
+        for bucket, _, _ in limits:
+            RATE_HITS[(ip, bucket)].append(now)
+    return None
+
+
+def active_runs() -> int:
+    """Runs currently executing. Caller holds LOCK."""
+    return sum(1 for rec in RUNS.values() if rec["state"] == "running")
+
+
+def evict(now: float) -> None:
+    """Drop idle records older than MAX_RECORD_AGE, then the oldest beyond MAX_RECORDS.
+
+    Running records are never dropped. Caller holds LOCK.
+    """
+    idle = sorted(
+        # A record's first event is its creation; one without events counts as oldest.
+        ((rec.get("events") or [{"at": 0}])[0]["at"], rid)
+        for rid, rec in RUNS.items()
+        if rec["state"] != "running"
+    )
+    excess = len(RUNS) - MAX_RECORDS
+    for created, rid in idle:
+        if excess <= 0 and now - created <= MAX_RECORD_AGE:
+            break
+        del RUNS[rid]
+        excess -= 1
 
 
 CONTENT_TYPES = {
@@ -111,6 +184,10 @@ def infer_manifest(task: str) -> tuple[dict, str, dict]:
         logger.error("LLM configuration refused: %s Using deterministic planner.", config["error"])
     elif not config["configured"]:
         logger.warning("No LLM provider is configured. Using deterministic planner.")
+    elif llm.cap_reached():
+        source = "Deterministic planner (daily model call cap reached)"
+        INFERENCE_STATUS.update(status="capped", last_error="Daily model call cap reached.")
+        logger.warning("Daily model call cap reached. Using deterministic planner.")
     else:
         provider, model = config["provider"], config["model"]
         preset = llm.PRESETS[provider]
@@ -327,21 +404,48 @@ class Handler(BaseHTTPRequestHandler):
         # We use structured application logs instead of the default HTTP access log.
         pass
 
-    def send_json(self, obj, status=200):
+    # Bounds how long one slow client can hold a request thread.
+    timeout = 30
+
+    def send_json(self, obj, status=200, headers=None):
         body = json.dumps(obj).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
-        self.send_header("Access-Control-Allow-Origin", "*")
+        # The UI is same-origin; a cross-origin header is sent only for one configured origin.
+        origin = os.getenv("ALLOWED_ORIGIN", "").strip()
+        if origin:
+            self.send_header("Access-Control-Allow-Origin", origin)
+            self.send_header("Vary", "Origin")
+        for name, value in (headers or {}).items():
+            self.send_header(name, value)
         self.end_headers()
         self.wfile.write(body)
 
+    def client_ip(self) -> str:
+        # Behind Caddy, the last X-Forwarded-For entry is the address Caddy saw.
+        if os.getenv("TRUST_PROXY", "").strip().lower() == "true":
+            forwarded = self.headers.get("X-Forwarded-For", "").split(",")[-1].strip()
+            if forwarded:
+                return forwarded[:64]
+        return self.client_address[0]
+
     def do_GET(self):
         if self.path == "/api/health":
+            config = llm.status()
+            with LOCK:
+                running = active_runs()
             return self.send_json(
                 {
                     "ok": True,
                     "docker_ready": docker_ready(),
+                    "runtime": os.getenv("SANDBOX_RUNTIME", "").strip() or "runc default",
+                    "require_vultr": config["require_vultr"],
+                    "provider": config["provider"],
+                    "model": config["model"],
+                    "concurrent_runs": running,
+                    "max_concurrent_runs": env_int("MAX_CONCURRENT_RUNS", 2),
+                    "llm_calls_today": llm.calls_today(),
                     "inference": dict(INFERENCE_STATUS),
                 }
             )
@@ -372,15 +476,36 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json({"error": "not found"}, 404)
 
     def do_POST(self):
+        if self.path in LIMITED_PATHS:
+            limited = rate_limited(self.client_ip(), self.path)
+            if limited:
+                message, retry = limited
+                logger.warning("Rate limited | path=%s", self.path)
+                return self.send_json({"error": message}, 429, {"Retry-After": str(retry)})
+
         try:
-            body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", "0"))))
+            length = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            return self.send_json({"error": "invalid Content-Length"}, 400)
+        if length > MAX_BODY_BYTES:
+            return self.send_json(
+                {"error": f"Request body is larger than {MAX_BODY_BYTES // 1024} KB."}, 413
+            )
+        try:
+            body = json.loads(self.rfile.read(max(length, 0)))
         except (json.JSONDecodeError, ValueError):
             return self.send_json({"error": "invalid JSON"}, 400)
+        if not isinstance(body, dict):
+            return self.send_json({"error": "Request body must be a JSON object."}, 400)
 
         if self.path == "/api/plan":
             task = str(body.get("task", "")).strip()
             if not task:
                 return self.send_json({"error": "Enter a task."}, 400)
+            if len(task) > MAX_TASK_CHARS:
+                return self.send_json(
+                    {"error": f"Task is longer than {MAX_TASK_CHARS} characters."}, 400
+                )
 
             logger.info("Received plan request.")
             manifest, planner, planned_by = infer_manifest(task)
@@ -388,7 +513,9 @@ class Handler(BaseHTTPRequestHandler):
 
             # The script is stored with this manifest ID; approval can never replace it.
             mode, script, written_by, codegen_error = BUILTIN, None, None, None
-            if llm.status()["configured"]:
+            if llm.status()["configured"] and llm.cap_reached():
+                codegen_error = "Daily model call cap reached; no model call was made."
+            elif llm.status()["configured"]:
                 try:
                     script, written_by = generate(task, manifest)
                     mode = MODEL_WRITTEN
@@ -426,6 +553,7 @@ class Handler(BaseHTTPRequestHandler):
 
             with LOCK:
                 RUNS[mid] = record
+                evict(time.time())
 
             return self.send_json(record)
 
@@ -468,6 +596,7 @@ class Handler(BaseHTTPRequestHandler):
 
             with LOCK:
                 RUNS[mid] = record
+                evict(time.time())
 
             return self.send_json(record)
 
@@ -494,10 +623,23 @@ class Handler(BaseHTTPRequestHandler):
                     )
 
                 try:
-                    rec["manifest"] = tighten(rec["manifest"], body)
+                    manifest = tighten(rec["manifest"], body)
                 except ValueError as exc:
                     return self.send_json({"error": str(exc)}, 400)
 
+                limit = env_int("MAX_CONCURRENT_RUNS", 2)
+                if active_runs() >= limit:
+                    logger.warning("Approval refused: %d run(s) already active.", limit)
+                    return self.send_json(
+                        {
+                            "error": f"The server is already running {limit} task(s), its "
+                            "limit. This plan is still awaiting approval; try again shortly."
+                        },
+                        429,
+                        {"Retry-After": "10"},
+                    )
+
+                rec["manifest"] = manifest
                 rec["state"] = "running"
                 rec["approved_at"] = time.time()
                 rec["events"].append(
@@ -624,5 +766,7 @@ if __name__ == "__main__":
         logger.info("Removed %d stale sandbox resource(s).", cleanup_stale())
     except Exception:
         logger.exception("Stale sandbox cleanup failed; continuing.")
-    logger.info("Slipstream listening on http://0.0.0.0:%s", port)
-    ThreadingHTTPServer(("0.0.0.0", port), Handler).serve_forever()
+    # Loopback by default: on a public VM, Caddy is the only thing that should reach this port.
+    host = os.getenv("HOST", "").strip() or "127.0.0.1"
+    logger.info("Slipstream listening on http://%s:%s", host, port)
+    ThreadingHTTPServer((host, port), Handler).serve_forever()

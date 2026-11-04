@@ -80,7 +80,9 @@ This MVP is a single-user hackathon demo, not a multi-tenant production service.
 
 ## Vultr deployment
 
-Deploy the web/control layer on a Vultr Cloud Compute instance with Docker installed, add the Vultr Serverless Inference API key as a server-side secret, build/push the image to Vultr Container Registry, and run Compose. See [deployment guide](docs/DEPLOY_VULTR.md). Inference calls go to Vultr's OpenAI-compatible endpoint. The task runner has no network; the control plane is the only component allowed to call inference.
+Deploy on one Vultr Cloud Compute VM (Ubuntu 24.04). The control server runs directly on the host under systemd, never in a container with the Docker socket. Sandboxes run under gVisor, and Caddy provides HTTPS. `deploy/` holds the setup script, systemd unit, Caddyfile and env template. See the [deployment runbook](docs/DEPLOY_VULTR.md). Inference calls go to Vultr's OpenAI-compatible endpoint. The task runner has no network; the control plane is the only component allowed to call inference.
+
+The server binds to `HOST` (default `127.0.0.1`) and `PORT` (default `8080`). It sends no CORS header unless `ALLOWED_ORIGIN` names one origin. For a public URL it enforces `MAX_CONCURRENT_RUNS` (default 2; extra approvals get 429 and stay awaiting approval). It rate-limits each client IP to `RATE_LIMIT_PER_MIN` plans per minute (default 10), and to twice that across plan, red team and approve requests; the IP comes from `X-Forwarded-For` only with `TRUST_PROXY=true`. Tasks are capped at 1000 characters and request bodies at 16 KB. `MAX_LLM_CALLS_PER_DAY` (default 300, UTC day) is a global model-call cap; past it, plans use the built-in planner and are labelled so. Only the newest 200 runs from the last 2 hours are kept in memory.
 
 ## Repository map
 

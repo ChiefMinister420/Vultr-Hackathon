@@ -1,19 +1,26 @@
+# Local experiments only; not the deployment path (see docs/DEPLOY_VULTR.md).
+# This mounts the Docker socket, which gives the container root on the host.
 services:
   slipstream:
     build:
       context: .
       dockerfile: Dockerfile
     ports:
-      - "${PORT:-8080}:8080"
+      - "127.0.0.1:${PORT:-8080}:8080"
     environment:
+      HOST: 0.0.0.0
       PORT: 8080
       VULTR_INFERENCE_API_KEY: ${VULTR_INFERENCE_API_KEY:-}
       VULTR_INFERENCE_MODEL: ${VULTR_INFERENCE_MODEL:-deepseek-v4.1-flash-1017}
       REQUIRE_VULTR: ${REQUIRE_VULTR:-}
       SLIPSTREAM_RUNNER_IMAGE: slipstream-runner:local
       SANDBOX_RUNTIME: ${SANDBOX_RUNTIME:-}
+      # The host daemon resolves the runner's bind mounts on the host, so its temp folders
+      # must live at the same path inside this container and on the host.
+      TMPDIR: /tmp/slipstream-compose
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
+      - /tmp/slipstream-compose:/tmp/slipstream-compose
     depends_on:
       runner-image:
         condition: service_completed_successfully

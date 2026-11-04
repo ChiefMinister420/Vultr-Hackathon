@@ -1,0 +1,9 @@
+# Replace <VM-IP> with the VM's public IPv4 address, e.g. 203.0.113.10.sslip.io.
+# sslip.io is a public DNS service that resolves <ip>.sslip.io to <ip>, so Caddy can obtain a
+# Let's Encrypt certificate automatically without registering a domain. Ports 80 and 443 must
+# be open for the certificate challenge. With a real domain, put it here instead.
+<VM-IP>.sslip.io {
+	# Must match PORT in /etc/slipstream.env. Slipstream listens on loopback only (HOST=127.0.0.1).
+	# Caddy replaces any client-sent X-Forwarded-For with the real client address.
+	reverse_proxy 127.0.0.1:8080
+}

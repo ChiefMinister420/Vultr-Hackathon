@@ -88,6 +88,7 @@ Deploy the web/control layer on a Vultr Cloud Compute instance with Docker insta
 - `app/policy.py` — deterministic manifest policy.
 - `app/llm.py` — provider-agnostic chat client (Vultr, Groq for development).
 - `app/codegen.py` — model-written scripts: prompt, code extraction, retries on token exhaustion.
+- `app/redteam.py` — red team self-test: fixed manifests, canned scripts, ATTEMPT-line scorecard.
 - `app/runner.py` — ephemeral Docker runner and capability checks.
 - `static/` — permission approval and live run dashboard.
 - `sandbox/` — minimal runner image and CSV analysis program.
@@ -99,7 +100,17 @@ Deploy the web/control layer on a Vultr Cloud Compute instance with Docker insta
 2. Inspect the permission slip: files, memory, CPU, duration, network, and secrets.
 3. Approve it. Before approval, Run is unavailable.
 4. Watch real container lifecycle and task events.
-5. Inspect the output chart and the allowed/used/blocked audit.
+5. Inspect the output chart, the network section (allowed hosts, hosts used, blocked attempts) and the allowed/used/blocked audit.
+
+### Red Team self-test
+
+The **Red Team self-test** buttons run canned, harmless scripts from `app/redteam.py` instead of a task (`POST /api/redteam {"scenario": ...}`). There is no model call and no provider is needed. Each one gets a fixed manifest (128 MB, 0.5 CPU, `network_domains: ["example.com"]`, no secrets) that still passes through the policy and still needs approval through `/api/approve`, with the same tighten-only rules. Runs are labelled `RED TEAM SELF-TEST` and recorded with mode `redteam`.
+
+6. Click **Escape attempts**, review the slip, approve. The scorecard should show: `exfil_unlisted_host` BLOCKED (the proxy returns 403, and its "host not in allowlist" line shows as a red row in the network section), `direct_socket_bypass` BLOCKED (network unreachable), `write_outside_output` BLOCKED (read-only file system for `/etc`, `/app` and the input folder), `write_output_folder` OK, `read_secrets` BLOCKED (0 names; only a count is printed, never a value), and `allowed_host` OK (example.com through the proxy).
+7. Click **Memory bomb** and approve. It allocates 16 MB chunks until the 128 MB limit kills it: "Killed at memory limit" (exit code 137).
+8. Click **Runaway CPU** and approve. It loops forever until the 8-second limit kills it: "Killed at time limit after N seconds".
+
+The run record and audit carry `redteam_attempts` (name, result, expected, detail) next to the `network` section, plus `redteam_outcome` for the memory and runaway runs.
 
 Submission checklist: public GitHub repository, deployed demo URL, under-5-minute demo video, PDF slides, and event-specific fields from the live submission form. The public event dashboard currently lists tracks as TBA.
 

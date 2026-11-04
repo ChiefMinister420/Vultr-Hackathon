@@ -61,6 +61,17 @@ button:disabled { opacity: .55; cursor: wait; }
 .hidden { display: none; }
 .footer { margin-top: 22px; color: #66746b; font: 10px 'DM Mono'; display: flex; justify-content: space-between; gap: 12px; }
 .danger { color: var(--red); }
+.redteam { margin-top: 18px; border-top: 1px solid var(--line); padding-top: 14px; }
+.redteam-tag { font: 600 11px 'DM Mono', monospace; letter-spacing: 1px; color: var(--red); border: 1px solid #5b302b; background: #291a19; border-radius: 6px; padding: 6px 9px; margin: 0 0 12px; display: inline-block; }
+.redteam-tag.hidden { display: none; }
+.outcome { font: 600 13px 'DM Mono', monospace; color: var(--red); margin: 4px 0 10px; }
+.scorecard { width: 100%; border-collapse: collapse; font: 11px/1.5 'DM Mono', monospace; color: #c4cec6; margin: 8px 0; }
+.scorecard th { text-align: left; color: #93a097; font-weight: 400; text-transform: uppercase; letter-spacing: .9px; font-size: 10px; padding: 4px 6px; border-bottom: 1px solid var(--line); }
+.scorecard td { padding: 5px 6px; border-bottom: 1px solid var(--line); vertical-align: top; word-break: break-word; }
+.scorecard tr.blocked td { color: var(--red); }
+.badge { display: inline-block; border-radius: 4px; padding: 1px 6px; font-weight: 500; }
+.badge.blocked { background: #291a19; color: var(--red); border: 1px solid #5b302b; }
+.badge.ok { background: #15261b; color: var(--mint); border: 1px solid #2f5a3e; }
 @media (max-width: 760px) {
   .shell { padding: 20px 16px; }
   .layout { grid-template-columns: 1fr; }

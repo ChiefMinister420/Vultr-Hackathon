@@ -34,6 +34,16 @@
           <span class="hint">Sample dataset · 14 rows · no network</span>
         </div>
 
+        <div class="redteam">
+          <div class="label">Red Team self-test</div>
+          <p class="sub">Canned, harmless scripts that try to get out of the sandbox. Fixed manifest, no model call, and you still approve each run.</p>
+          <div class="row">
+            <button class="secondary" data-scenario="escape">Escape attempts</button>
+            <button class="secondary" data-scenario="memory">Memory bomb</button>
+            <button class="secondary" data-scenario="runaway">Runaway CPU</button>
+          </div>
+        </div>
+
         <div id="manifest" class="manifest hidden">
           <div class="row" style="justify-content:space-between;margin:0 0 12px">
             <div>
@@ -42,11 +52,12 @@
             </div>
             <span class="tag">awaiting approval</span>
           </div>
+          <div id="redteam-tag" class="redteam-tag hidden">RED TEAM SELF-TEST · canned harmless script</div>
           <div class="grid">
-            <div class="perm"><div class="label">Network</div><div class="value">None <small>· isolated</small></div></div>
+            <div class="perm"><div class="label">Network</div><div class="value" id="net-value">None <small>· isolated</small></div></div>
             <div class="perm"><div class="label">Secrets</div><div class="value">None</div></div>
-            <div class="perm"><div class="label">Memory</div><div class="value">256 <small>MB / max 512</small></div></div>
-            <div class="perm"><div class="label">CPU</div><div class="value">1 <small>core / max 1</small></div></div>
+            <div class="perm"><div class="label">Memory</div><div class="value" id="mem-value">256 <small>MB / max 512</small></div></div>
+            <div class="perm"><div class="label">CPU</div><div class="value" id="cpu-value">1 <small>core / max 1</small></div></div>
             <div class="perm">
               <div class="label">Time limit · edit to tighten</div>
               <div class="value">
@@ -61,7 +72,7 @@
           </div>
           <div class="hint" id="mode"></div>
           <details id="script-box" class="hidden">
-            <summary class="hint">Model-written script (runs in the sandbox under this manifest; approval does not change it)</summary>
+            <summary class="hint" id="script-summary">Model-written script (runs in the sandbox under this manifest; approval does not change it)</summary>
             <div class="report"><pre id="script"></pre></div>
           </details>
           <div class="buttons">
@@ -85,6 +96,15 @@
         </div>
 
         <div id="output" class="hidden">
+          <div id="redteam-report" class="report hidden">
+            <div class="redteam-tag">RED TEAM SELF-TEST</div>
+            <div id="redteam-outcome" class="outcome hidden"></div>
+            <table id="scorecard" class="scorecard hidden"></table>
+          </div>
+          <div id="network-report" class="report hidden">
+            <div class="label">Network · allowed / used / blocked</div>
+            <div id="network"></div>
+          </div>
           <div class="report">
             <div class="label">Task output</div>
             <div id="chart" class="chart"></div>

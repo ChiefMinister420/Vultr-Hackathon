@@ -80,6 +80,7 @@ function updateInferenceIndicator(inference) {
 }
 
 function providerLabel(provider, model) {
+  if (provider === 'redteam') return 'Red team canned script (app/redteam.py)';
   if (provider === 'vultr') return `Vultr Serverless Inference (${model})`;
   if (provider === 'groq') return `DEV ONLY: Groq (${model}), not the submission provider`;
   return 'Built-in analyze.py';
@@ -92,8 +93,15 @@ function plannerLabel(plan) {
 }
 
 function renderMode(plan) {
-  if (plan.mode === 'model-written') {
+  $('redteam-tag').classList.toggle('hidden', plan.mode !== 'redteam');
+  if (plan.mode === 'redteam') {
+    $('mode').textContent = `Code: RED TEAM SELF-TEST "${plan.redteam_scenario}", canned script from app/redteam.py (no model call)`;
+    $('script-summary').textContent = 'Red team script (canned and harmless; runs in the sandbox under this manifest)';
+    $('script').textContent = plan.script;
+    $('script-box').classList.remove('hidden');
+  } else if (plan.mode === 'model-written') {
     $('mode').textContent = 'Code: model-written by ' + providerLabel(plan.codegen.provider, plan.codegen.model);
+    $('script-summary').textContent = 'Model-written script (runs in the sandbox under this manifest; approval does not change it)';
     $('script').textContent = plan.script;
     $('script-box').classList.remove('hidden');
   } else {
@@ -114,22 +122,35 @@ function renderAttempts(run) {
 updateHealth();
 setInterval(updateHealth, 5000);
 
+function renderManifest(manifest) {
+  const hosts = manifest.network_domains || [];
+  $('net-value').innerHTML = hosts.length
+    ? `${escapeHtml(hosts.join(', '))} <small>· allowlist proxy only</small>`
+    : 'None <small>· isolated</small>';
+  $('mem-value').innerHTML = `${escapeHtml(manifest.memory_mb)} <small>MB / max 512</small>`;
+  $('cpu-value').innerHTML = `${escapeHtml(manifest.cpu_cores)} <small>core / max 1</small>`;
+}
+
+function showPlan(plan) {
+  current = plan;
+  $('planner').textContent = plannerLabel(plan);
+  renderMode(plan);
+  renderManifest(plan.manifest);
+  $('time').value = plan.manifest.time_seconds;
+  $('time').max = plan.manifest.time_seconds;
+  $('manifest').classList.remove('hidden');
+  $('output').classList.add('hidden');
+  renderEvents(plan.events);
+  $('state').textContent = plan.mode === 'redteam' ? 'RED TEAM · REVIEW' : 'REVIEW';
+  $('dot').className = 'dot';
+}
+
 $('plan').onclick = async () => {
   try {
     $('plan').disabled = true;
     $('banner').classList.add('hidden');
 
-    current = await api('/api/plan', { task: $('task').value });
-
-    $('planner').textContent = plannerLabel(current);
-    renderMode(current);
-    $('time').value = current.manifest.time_seconds;
-    $('time').max = current.manifest.time_seconds;
-    $('manifest').classList.remove('hidden');
-    $('output').classList.add('hidden');
-    renderEvents(current.events);
-    $('state').textContent = 'REVIEW';
-    $('dot').className = 'dot';
+    showPlan(await api('/api/plan', { task: $('task').value }));
 
     // The health endpoint reflects whether the most recent inference request worked.
     await updateHealth();
@@ -139,6 +160,20 @@ $('plan').onclick = async () => {
     $('plan').disabled = false;
   }
 };
+
+document.querySelectorAll('[data-scenario]').forEach((button) => {
+  button.onclick = async () => {
+    try {
+      button.disabled = true;
+      $('banner').classList.add('hidden');
+      showPlan(await api('/api/redteam', { scenario: button.dataset.scenario }));
+    } catch (error) {
+      showBanner(error.message);
+    } finally {
+      button.disabled = false;
+    }
+  };
+});
 
 $('reject').onclick = () => {
   if (!current) return;
@@ -176,13 +211,15 @@ async function refresh(id) {
 
     if (['completed', 'failed', 'timeout'].includes(run.state)) {
       clearInterval(poll);
-      $('state').textContent = run.state.toUpperCase();
+      $('state').textContent = (run.mode === 'redteam' ? 'RED TEAM · ' : '') + run.state.toUpperCase();
       $('dot').className = 'dot';
 
       $('chart').innerHTML = '';
       $('table').textContent = '';
       if (run.result?.artifact) renderChart(run.result.artifact);
       renderAttempts(run);
+      renderNetwork(run.report?.network);
+      renderRedteam(run);
 
       if (run.report) {
         $('output').classList.remove('hidden');
@@ -201,6 +238,51 @@ async function refresh(id) {
     clearInterval(poll);
     showBanner(error.message);
   }
+}
+
+function renderNetwork(network) {
+  $('network-report').classList.toggle('hidden', !network);
+  if (!network) return;
+  const list = (hosts) => hosts.length ? escapeHtml(hosts.join(', ')) : 'none';
+  const blocked = network.blocked.map((b) => `
+    <tr class="blocked">
+      <td>${escapeHtml(b.host ?? '?')}${b.port ? ':' + escapeHtml(b.port) : ''}</td>
+      <td>${escapeHtml(b.reason ?? '')}</td>
+    </tr>
+  `).join('');
+  $('network').innerHTML = `
+    <div class="table">
+      Mode: ${escapeHtml(network.mode)}<br>
+      Allowed hosts: ${list(network.allowed)}<br>
+      Hosts actually used: ${list(network.used)}<br>
+      Blocked attempts: ${network.blocked.length}
+    </div>
+    ${blocked ? `<table class="scorecard"><tr><th>Blocked host</th><th>Proxy reason</th></tr>${blocked}</table>` : ''}
+  `;
+}
+
+function renderRedteam(run) {
+  const isRedteam = run.mode === 'redteam';
+  $('redteam-report').classList.toggle('hidden', !isRedteam);
+  if (!isRedteam) return;
+
+  const outcome = run.redteam_outcome;
+  $('redteam-outcome').textContent = outcome || '';
+  $('redteam-outcome').classList.toggle('hidden', !outcome);
+
+  const attempts = run.redteam_attempts || [];
+  $('scorecard').classList.toggle('hidden', !attempts.length);
+  $('scorecard').innerHTML = attempts.length ? `
+    <tr><th>Attempt</th><th>Result</th><th>Expected</th><th>Detail</th></tr>
+    ${attempts.map((a) => `
+      <tr>
+        <td>${escapeHtml(a.name)}</td>
+        <td><span class="badge ${a.result === 'OK' ? 'ok' : 'blocked'}">${escapeHtml(a.result)}</span></td>
+        <td>${a.as_expected ? '✓ ' + escapeHtml(a.expected) : '<span class="danger">✗ expected ' + escapeHtml(a.expected) + '</span>'}</td>
+        <td>${escapeHtml(a.detail)}</td>
+      </tr>
+    `).join('')}
+  ` : '';
 }
 
 function renderEvents(events) {

@@ -10,7 +10,7 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from app import codegen, llm
+from app import codegen, llm, redteam
 from app.policy import apply_policy, tighten
 from app.runner import cleanup_stale, docker_ready, execute_csv
 
@@ -18,6 +18,8 @@ ROOT = Path(__file__).resolve().parents[1]
 SAMPLE_CSV = ROOT / "examples" / "sales.csv"
 MODEL_WRITTEN = "model-written"
 BUILTIN = "builtin"
+REDTEAM = "redteam"
+REDTEAM_SOURCE = {"provider": REDTEAM, "model": "app/redteam.py"}
 MAX_ATTEMPTS = 3
 
 RUNS = {}
@@ -201,12 +203,12 @@ def generate(task: str, manifest: dict, previous_script=None, error=None) -> tup
 
 
 def attempt_record(number: int, mode: str, written_by: dict, script, result: dict) -> dict:
-    model_written = mode == MODEL_WRITTEN
+    has_script = mode != BUILTIN
     return {
         "attempt": number,
         "mode": mode,
-        "provider": written_by.get("provider") if model_written else BUILTIN,
-        "model": written_by.get("model") if model_written else "analyze.py",
+        "provider": written_by.get("provider") if has_script else BUILTIN,
+        "model": written_by.get("model") if has_script else "analyze.py",
         "status": result.get("status"),
         "exit_code": result.get("exit_code"),
         "killed": bool(result.get("killed")),
@@ -214,14 +216,18 @@ def attempt_record(number: int, mode: str, written_by: dict, script, result: dic
         "container": result.get("container"),
         "stdout": (result.get("stdout") or "")[-4096:],
         "stderr": (result.get("stderr") or "")[-4096:],
-        "script": script if model_written else None,
+        "script": script if has_script else None,
         "limits": result.get("limits"),
         "net_events": result.get("net_events") or [],
     }
 
 
 def audit_report(
-    manifest: dict, result: dict, planner: dict | None = None, attempts: list | None = None
+    manifest: dict,
+    result: dict,
+    planner: dict | None = None,
+    attempts: list | None = None,
+    redteam_summary: dict | None = None,
 ) -> dict:
     # Limits come from what the runner passed to Docker, not from the manifest.
     limits = result.get("limits") or {}
@@ -256,6 +262,16 @@ def audit_report(
             "used": used_hosts,
             "blocked": blocked,
         },
+        **(
+            {
+                "mode": REDTEAM,
+                "redteam_scenario": redteam_summary["scenario"],
+                "redteam_attempts": redteam_summary["attempts"],
+                "redteam_outcome": redteam_summary["outcome"],
+            }
+            if redteam_summary
+            else {}
+        ),
         "used": {
             "network_domains": used_hosts,
             # This is an artifact-based indicator, not syscall-level
@@ -413,6 +429,48 @@ class Handler(BaseHTTPRequestHandler):
 
             return self.send_json(record)
 
+        if self.path == "/api/redteam":
+            scenario = body.get("scenario")
+            if not isinstance(scenario, str) or scenario not in redteam.SCENARIOS:
+                return self.send_json(
+                    {"error": "scenario must be one of: " + ", ".join(redteam.SCENARIOS)}, 400
+                )
+
+            # Fixed draft and canned script: no model call, but the same policy and approval.
+            manifest, _ = apply_policy(redteam.draft(scenario))
+            mid = secrets.token_urlsafe(12)
+            planner = "Red team self-test (fixed manifest, no model call)"
+            record = {
+                "id": mid,
+                "task": f"Red team self-test: {scenario}",
+                "manifest": manifest,
+                "planner": planner,
+                "provider": REDTEAM,
+                "model": None,
+                "finish_reason": None,
+                "mode": REDTEAM,
+                "redteam_scenario": scenario,
+                "script": redteam.SCENARIOS[scenario]["script"],
+                "codegen": dict(REDTEAM_SOURCE),
+                "codegen_error": None,
+                "state": "awaiting_approval",
+                "events": [
+                    {"at": time.time(), "kind": "plan", "text": f"Manifest drafted by {planner}."},
+                    {
+                        "at": time.time(),
+                        "kind": "plan",
+                        "text": f"RED TEAM SELF-TEST ({scenario}): canned script from "
+                        "app/redteam.py will run in the sandbox.",
+                    },
+                ],
+            }
+            logger.info("Red team plan created | scenario=%s | id=%s", scenario, mid)
+
+            with LOCK:
+                RUNS[mid] = record
+
+            return self.send_json(record)
+
         if self.path == "/api/approve":
             rid = body.get("id")
 
@@ -465,6 +523,7 @@ class Handler(BaseHTTPRequestHandler):
             mode = rec.get("mode", BUILTIN)
             script = rec.get("script")
             written_by = rec.get("codegen") or {}
+            scenario = rec.get("redteam_scenario")
             attempts = rec["attempts"] = []
 
         logger.info("Starting execution | run_id=%s | mode=%s", rid, mode)
@@ -472,7 +531,7 @@ class Handler(BaseHTTPRequestHandler):
 
         try:
             for number in range(1, MAX_ATTEMPTS + 1):
-                result = execute_csv(task, manifest, script if mode == MODEL_WRITTEN else None)
+                result = execute_csv(task, manifest, script if mode != BUILTIN else None)
                 # Debug only: stdout comes from model-written code.
                 logger.debug("Full runner result: %s", json.dumps(result, default=str)[:4000])
                 logger.info(
@@ -517,6 +576,7 @@ class Handler(BaseHTTPRequestHandler):
                         )
                     break
 
+            summary = redteam.summarize(scenario, result) if mode == REDTEAM else None
             with LOCK:
                 rec["result"] = result
                 rec["state"] = result["status"]
@@ -524,7 +584,20 @@ class Handler(BaseHTTPRequestHandler):
                 rec["output_files"] = result.get("files") or []
                 if regen_error:
                     rec["error"] = regen_error
-                rec["report"] = audit_report(manifest, result, planned_by, attempts)
+                if summary:
+                    rec["redteam_attempts"] = summary["attempts"]
+                    rec["redteam_outcome"] = summary["outcome"]
+                    passed = sum(1 for a in summary["attempts"] if a.get("as_expected"))
+                    rec["events"].append(
+                        {
+                            "at": time.time(),
+                            "kind": "redteam",
+                            "text": summary["outcome"]
+                            or f"Red team: {passed}/{len(summary['attempts'])} attempts "
+                            "contained as expected.",
+                        }
+                    )
+                rec["report"] = audit_report(manifest, result, planned_by, attempts, summary)
 
         except Exception as exc:
             logger.exception("Execution failed | run_id=%s", rid)

@@ -11,7 +11,7 @@ from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from app import codegen, llm, redteam
+from app import codegen, llm, redteam, report_text
 from app.policy import apply_policy, tighten
 from app.runner import cleanup_stale, docker_ready, execute_csv
 
@@ -394,6 +394,13 @@ def audit_report(
     return report
 
 
+def add_report_points(rec: dict) -> None:
+    """Attach the plain-language report to the run record and its audit. Caller holds LOCK."""
+    points = report_text.observations(rec)
+    rec["report_points"] = points
+    rec["report"]["report_points"] = points
+
+
 def _planner_info(planner: dict | None) -> dict:
     planner = planner or {}
     return {"provider": planner.get("provider"), "model": planner.get("model")}
@@ -740,6 +747,7 @@ class Handler(BaseHTTPRequestHandler):
                         }
                     )
                 rec["report"] = audit_report(manifest, result, planned_by, attempts, summary)
+                add_report_points(rec)
 
         except Exception as exc:
             logger.exception("Execution failed | run_id=%s", rid)
@@ -754,6 +762,7 @@ class Handler(BaseHTTPRequestHandler):
                     "cleanup": "No task process was started.",
                     "planner": _planner_info(planned_by),
                 }
+                add_report_points(rec)
 
 
 if __name__ == "__main__":

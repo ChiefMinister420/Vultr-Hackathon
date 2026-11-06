@@ -5,133 +5,161 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Slipstream — permission-first agent runs</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=DM+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="styles.css">
   <script src="app.js" defer></script>
 </head>
 <body>
-  <div class="shell">
-    <header class="nav">
-      <div class="brand"><i>↗</i>slipstream</div>
-      <div class="tag">VULTR AGENT RUSH · MVP</div>
-    </header>
+  <header class="site-header">
+    <a class="brand" href="#top"><span class="brand-mark" aria-hidden="true">S</span>Slipstream</a>
+    <button id="menu-toggle" class="menu-toggle" type="button" aria-expanded="false" aria-controls="site-nav" aria-label="Open menu">
+      <span class="menu-line"></span>
+      <span class="menu-line"></span>
+    </button>
+  </header>
 
+  <main id="top" class="page">
     <section class="hero">
-      <div class="tag">Least privilege, made visible</div>
-      <h1>Every run gets a key<br>for <span>only one door.</span></h1>
-      <p>Before an agent acts, Slipstream turns its task into a permission slip. You review the limits, approve the run, then watch an ephemeral sandbox do the work.</p>
+      <h1 class="hero-title">Slipstream</h1>
+      <p class="hero-lede">A permission slip before every agent run.</p>
+      <button class="btn-primary" id="hero-cta" type="button">Plan a task</button>
     </section>
 
-    <div id="banner" class="banner hidden"></div>
+    <div id="banner" class="banner hidden" role="status"></div>
 
-    <main class="layout">
-      <section class="card">
-        <h2>Describe a task</h2>
-        <p class="sub">The planner proposes a manifest. Nothing runs before you approve it.</p>
-        <textarea id="task" class="textarea">Analyze the sample sales CSV and show the top 5 products by revenue.</textarea>
-        <div class="row">
-          <button class="primary" id="plan">Draft permission slip ↗</button>
-          <span class="hint">Sample dataset · 14 rows · no network</span>
-        </div>
+    <section class="section" id="run-task" aria-labelledby="run-task-title">
+      <h2 id="run-task-title">Run a task</h2>
+      <p class="sub">The planner proposes a manifest. Nothing runs before you approve it.</p>
+      <label class="visually-hidden" for="task">Task</label>
+      <textarea id="task" class="textarea">Analyze the sample sales CSV and show the top 5 products by revenue.</textarea>
+      <div class="row">
+        <button class="primary" id="plan">Draft permission slip</button>
+        <span class="hint">Sample dataset · 14 rows · no network</span>
+      </div>
 
-        <div class="redteam">
-          <div class="label">Red Team self-test</div>
-          <p class="sub">Canned, harmless scripts that try to get out of the sandbox. Fixed manifest, no model call, and you still approve each run.</p>
-          <div class="row">
-            <button class="secondary" data-scenario="escape">Escape attempts</button>
-            <button class="secondary" data-scenario="memory">Memory bomb</button>
-            <button class="secondary" data-scenario="runaway">Runaway CPU</button>
-          </div>
-        </div>
-
-        <div id="manifest" class="manifest hidden">
-          <div class="row" style="justify-content:space-between;margin:0 0 12px">
-            <div>
-              <h2>Permission manifest</h2>
-              <div class="hint" id="planner"></div>
-            </div>
-            <span class="tag">awaiting approval</span>
-          </div>
-          <div id="redteam-tag" class="redteam-tag hidden">RED TEAM SELF-TEST · canned harmless script</div>
-          <div class="grid">
-            <div class="perm"><div class="label">Network</div><div class="value" id="net-value">None <small>· isolated</small></div></div>
-            <div class="perm"><div class="label">Secrets</div><div class="value">None</div></div>
-            <div class="perm"><div class="label">Memory</div><div class="value" id="mem-value">256 <small>MB / max 512</small></div></div>
-            <div class="perm"><div class="label">CPU</div><div class="value" id="cpu-value">1 <small>core / max 1</small></div></div>
-            <div class="perm">
-              <div class="label">Time limit · edit to tighten</div>
-              <div class="value">
-                <input id="time" type="number" min="5" max="60" value="30" style="width:60px;background:#0b100e;color:var(--ink);border:1px solid #344138;border-radius:5px;padding:4px;font:14px 'DM Mono'">
-                seconds
-              </div>
-            </div>
-            <div class="perm full">
-              <div class="label">Files</div>
-              <div class="resource">/workspace/input/sales.csv <small>read</small><br>/workspace/output/report.json <small>write</small></div>
-            </div>
-          </div>
-          <div class="hint" id="mode"></div>
-          <details id="script-box" class="hidden">
-            <summary class="hint" id="script-summary">Model-written script (runs in the sandbox under this manifest; approval does not change it)</summary>
-            <div class="report"><pre id="script"></pre></div>
-          </details>
-          <div class="buttons">
-            <button class="approve" id="approve">Approve &amp; run</button>
-            <button class="reject" id="reject">Reject</button>
-          </div>
-        </div>
-      </section>
-
-      <section class="card">
-        <div class="row" style="justify-content:space-between;margin:0">
+      <div id="manifest" class="manifest hidden">
+        <div class="manifest-head">
           <div>
-            <h2>Execution stream</h2>
-            <p class="sub" style="margin:5px 0 0">Live lifecycle and audit events</p>
+            <h3>Permission manifest</h3>
+            <div class="hint" id="planner"></div>
           </div>
-          <div class="status"><span class="dot" id="dot"></span><span id="state">IDLE</span></div>
+          <span class="tag">awaiting approval</span>
         </div>
-
-        <div class="events" id="events">
-          <div class="event"><i>—</i><span>Waiting for a task to be planned.</span></div>
+        <div id="redteam-tag" class="redteam-tag hidden">RED TEAM SELF-TEST · canned harmless script</div>
+        <div class="grid">
+          <div class="perm"><div class="label">Network</div><div class="value" id="net-value">None <small>· isolated</small></div></div>
+          <div class="perm"><div class="label">Secrets</div><div class="value">None</div></div>
+          <div class="perm"><div class="label">Memory</div><div class="value" id="mem-value">256 <small>MB / max 512</small></div></div>
+          <div class="perm"><div class="label">CPU</div><div class="value" id="cpu-value">1 <small>core / max 1</small></div></div>
+          <div class="perm">
+            <label class="label" for="time">Time limit · edit to tighten</label>
+            <div class="value">
+              <input id="time" class="time-input" type="number" min="5" max="60" value="30">
+              seconds
+            </div>
+          </div>
+          <div class="perm full">
+            <div class="label">Files</div>
+            <div class="resource">/workspace/input/sales.csv <small>read</small><br>/workspace/output/report.json <small>write</small></div>
+          </div>
         </div>
+        <div class="hint" id="mode"></div>
+        <details id="script-box" class="hidden">
+          <summary class="hint" id="script-summary">Model-written script (runs in the sandbox under this manifest; approval does not change it)</summary>
+          <div class="report"><pre id="script"></pre></div>
+        </details>
+        <div class="buttons">
+          <button class="approve" id="approve">Approve &amp; run</button>
+          <button class="reject" id="reject">Reject</button>
+        </div>
+      </div>
+    </section>
 
-        <div id="output" class="hidden">
-          <div id="redteam-report" class="report hidden">
-            <div class="redteam-tag">RED TEAM SELF-TEST</div>
-            <div id="redteam-outcome" class="outcome hidden"></div>
-            <table id="scorecard" class="scorecard hidden"></table>
-          </div>
-          <div id="network-report" class="report hidden">
-            <div class="label">Network · allowed / used / blocked</div>
-            <div id="network"></div>
-          </div>
-          <div class="report">
-            <div class="label">Task output</div>
-            <div id="chart" class="chart"></div>
-            <div id="table" class="table"></div>
-          </div>
-          <div class="report">
+    <section class="section" id="red-team" aria-labelledby="red-team-title">
+      <h2 id="red-team-title">Red team self-test</h2>
+      <p class="sub">Canned, harmless scripts that try to get out of the sandbox. Fixed manifest, no model call, and you still approve each run.</p>
+      <div class="row">
+        <button class="secondary" data-scenario="escape">Escape attempts</button>
+        <button class="secondary" data-scenario="memory">Memory bomb</button>
+        <button class="secondary" data-scenario="runaway">Runaway CPU</button>
+      </div>
+    </section>
+
+    <section class="section" id="last-run" aria-labelledby="last-run-title">
+      <div class="section-head">
+        <div>
+          <h2 id="last-run-title">Last run audit</h2>
+          <p class="sub">Live lifecycle and audit events</p>
+        </div>
+        <div class="status"><span class="dot" id="dot"></span><span id="state">IDLE</span></div>
+      </div>
+
+      <div class="events" id="events">
+        <div class="event"><i>—</i><span>Waiting for a task to be planned.</span></div>
+      </div>
+
+      <div id="output" class="hidden">
+        <div id="report-block" class="report">
+          <h3 class="report-title">Run report</h3>
+          <ul id="report-points" class="points"></ul>
+          <p id="report-fallback" class="hint hidden">A plain-language summary is not available for this run. The technical details below have the full record.</p>
+        </div>
+        <div class="report">
+          <div class="label">Task output</div>
+          <div id="chart" class="chart"></div>
+          <div id="table" class="table"></div>
+        </div>
+        <div id="redteam-report" class="report hidden">
+          <div class="redteam-tag">RED TEAM SELF-TEST</div>
+          <div id="redteam-outcome" class="outcome hidden"></div>
+          <table id="scorecard" class="scorecard hidden"></table>
+        </div>
+        <div id="network-report" class="report hidden">
+          <div class="label">Network · allowed / used / blocked</div>
+          <div id="network"></div>
+        </div>
+        <div class="report">
+          <button id="tech-toggle" class="tech-toggle" type="button" aria-expanded="false" aria-controls="tech-details">Technical details</button>
+          <div id="tech-details" class="tech-details" hidden>
             <div class="label">Attempts</div>
             <pre id="attempts"></pre>
             <div class="label">Final output (stdout of the last attempt)</div>
             <pre id="final"></pre>
-          </div>
-          <div class="report">
-            <div class="label">Run report · allowed / used / blocked</div>
+            <div class="label">Audit record (JSON)</div>
             <pre id="audit"></pre>
           </div>
         </div>
-      </section>
-    </main>
-
-    <div class="footer">
-      <span>SLIPSTREAM · PERMISSION FIRST EXECUTION</span>
-      <div class="inference-status">
-        <span class="dot" id="inference-dot"></span>
-        <span id="inference-label">CHECKING VULTR INFERENCE…</span>
       </div>
-      <span id="engine">CHECKING RUNNER…</span>
+    </section>
+
+    <section class="section" id="how-it-works" aria-labelledby="how-it-works-title">
+      <h2 id="how-it-works-title">How it works</h2>
+      <p class="prose">Every task starts as a permission slip that lists the files, memory, CPU, time and websites it may use, and nothing runs until you approve it. The approved work then runs in a locked, throwaway container with a read-only system, no secrets and hard resource limits. It can reach only the websites listed on the slip, through a proxy that refuses everything else. When it finishes, you get a report of what it used and what was blocked, and the container is removed.</p>
+    </section>
+  </main>
+
+  <footer class="footer">
+    <span>SLIPSTREAM · PERMISSION FIRST EXECUTION</span>
+    <div class="inference-status">
+      <span class="dot" id="inference-dot"></span>
+      <span id="inference-label">CHECKING VULTR INFERENCE…</span>
     </div>
-  </div>
+    <span id="engine">CHECKING RUNNER…</span>
+  </footer>
+
+  <nav id="site-nav" class="site-nav" aria-label="Site" aria-hidden="true" inert>
+    <ul class="nav-links">
+      <li style="--i:0"><a href="#run-task" data-section="run-task" class="active" aria-current="location">Run a task</a></li>
+      <li style="--i:1"><a href="#red-team" data-section="red-team">Red team self-test</a></li>
+      <li style="--i:2"><a href="#last-run" data-section="last-run">Last run audit</a></li>
+      <li style="--i:3"><a href="#how-it-works" data-section="how-it-works">How it works</a></li>
+    </ul>
+    <div class="nav-meta" style="--i:4">
+      <p>Provider: <span id="nav-provider">unknown</span></p>
+      <p>Runtime: <span id="nav-runtime">unknown</span></p>
+      <p><a href="https://github.com/ChiefMinister420/Vultr-Hackathon" target="_blank" rel="noopener">GitHub</a></p>
+    </div>
+  </nav>
 </body>
 </html>
